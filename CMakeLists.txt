@@ -15,5 +15,5 @@ include_directories(./)
 ## subdirectory
 add_subdirectory(common)
 # add_subdirectory(co)
-add_subdirectory(test)
+add_subdirectory(tests)
 
