@@ -9,11 +9,11 @@ set(CMAKE_CXX_STANDARD 20)
 set(EXECUTABLE_OUTPUT_PATH ${CMAKE_BINARY_DIR}/bin)
 set(LIBRARY_OUTPUT_PATH ${CMAKE_BINARY_DIR}/lib)
 
-include_directories(./)
+include_directories(
+    ./
+)
 
 
 ## subdirectory
-add_subdirectory(common)
-# add_subdirectory(co)
 add_subdirectory(tests)
 

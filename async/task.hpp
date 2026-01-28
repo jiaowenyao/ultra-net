@@ -4,7 +4,7 @@
 #include <optional>
 #include <assert.h>
 #include <format>
-#include "common/utils/noncopyable.h"
+#include "utils/noncopyable.h"
 
 
 namespace ynet::async {
