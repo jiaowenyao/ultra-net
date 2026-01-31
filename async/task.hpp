@@ -5,11 +5,15 @@
 #include <assert.h>
 #include <format>
 #include "utils/noncopyable.h"
+#include "scheduling/thread_pool.hpp"
 
 
 namespace ynet::async {
 
 struct TaskPromiseBase {
+    TaskPromiseBase() {
+        m_creator_scheduler = ExecutionContext::current();
+    }
 
     // 最终的等待器
     struct TaskFinalAwaiter {
@@ -24,29 +28,34 @@ struct TaskPromiseBase {
          */
         template <typename T>
         std::coroutine_handle<> await_suspend(std::coroutine_handle<T> callee) const noexcept {
-            /**
-             * 如果有调用者，就恢复调用者
-             * 如果没有，说明是顶层任务
-             */
-            if (callee.promise().m_caller) {
-                return callee.promise().m_caller;
+            auto& promise = callee.promise();
+            auto* pool = promise.m_creator_scheduler;
+            if (pool != nullptr) {
+                pool->decrement_tasks();
             }
-            else {
-                if (callee.promise().m_ex != nullptr) [[unlikely]] {
-                    // 处理未捕获的异常
-                    try {
-                        std::rethrow_exception(callee.promise().m_ex);
-                    }
-                    catch (const std::exception& e) {
-                        std::cerr << std::format("catch a exception: {}", e.what());
-                        std::terminate();
-                    }
+
+            if (promise.m_caller) {
+                // 调用者放入调度器
+                if (promise.m_creator_scheduler) {
+                    promise.m_creator_scheduler->submit(promise.m_caller);
                 }
-                // 这里不主动调用destroy，而是交给Task析构时调用
-                // callee.destroy();
-                // 返回空协程句柄
-                return std::noop_coroutine();
+                return promise.m_caller;
             }
+
+            if (promise.m_ex != nullptr) [[unlikely]] {
+                // 处理未捕获的异常
+                try {
+                    std::rethrow_exception(promise.m_ex);
+                }
+                catch (const std::exception& e) {
+                    std::cerr << std::format("catch a exception: {}", e.what());
+                    std::terminate();
+                }
+            }
+            // 这里不主动调用destroy，而是交给Task析构时调用
+            // callee.destroy();
+            // 返回空协程句柄
+            return std::noop_coroutine();
         }
 
         constexpr void await_resume() const noexcept {}
@@ -72,6 +81,7 @@ struct TaskPromiseBase {
 
     std::coroutine_handle<> m_caller = nullptr;
     std::exception_ptr m_ex = nullptr;
+    Scheduler* m_creator_scheduler = nullptr;
 };
 
 template <typename T>
@@ -143,6 +153,11 @@ private:
         template <typename PromiseType>
         std::coroutine_handle<> await_suspend(std::coroutine_handle<PromiseType> caller) {
             m_callee.promise().m_caller = caller;
+            // 放入调度器
+            if (auto* scheduler = m_callee.promise().m_creator_scheduler) {
+                scheduler->submit(m_callee);
+                return std::noop_coroutine();
+            }
             return m_callee;
         }
     };

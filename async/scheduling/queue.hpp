@@ -1,67 +1,12 @@
 #pragma once
-#include <coroutine>
-#include <memory>
+
+#include "unified_task.hpp"
 #include <atomic>
-#include <vector>
+#include <memory>
 #include <optional>
+#include <vector>
 
-
-namespace ynet::runtime {
-
-
-class UnifiedTask {
-private:
-    struct TaskVariant {
-        virtual ~TaskVariant() = default;
-        virtual void execute() = 0;
-        virtual bool is_coroutine() const noexcept { return false; }
-        virtual std::coroutine_handle<> get_coroutine_handle() {
-            return std::coroutine_handle<>{};
-        }
-    };
-
-    template <typename F>
-    struct FunctionTask : TaskVariant {
-        F func;
-        FunctionTask(F&& f) : func(std::forward<F>(f)) {}
-        void execute() override { func(); }
-    };
-
-    template <typename Promise>
-    struct CoroutineTask : TaskVariant {
-        std::coroutine_handle<Promise> handle;
-        CoroutineTask(std::coroutine_handle<Promise> h) : handle(h) {}
-        void execute() override {
-            if (handle && !handle.done()) {
-                handle.resume();
-            }
-        }
-        bool is_coroutine() const noexcept override { return true; }
-        std::coroutine_handle<> get_coroutine_handle() override { return handle; }
-    };
-
-    std::unique_ptr<TaskVariant> m_task = nullptr;
-public:
-    UnifiedTask() = default;
-
-    template <typename F>
-    UnifiedTask(F&& f)
-        : m_task(std::make_unique<FunctionTask<F>>(std::forward<F>(f))) {}
-
-    template <typename Promise>
-    UnifiedTask(std::coroutine_handle<Promise> handle)
-        : m_task(std::make_unique<CoroutineTask<Promise>>(handle)) {}
-
-    void operator()() { if (m_task) { m_task->execute(); } }
-
-    bool is_coroutine() const noexcept { return m_task ? m_task->is_coroutine() : false; }
-
-    std::coroutine_handle<> get_coroutine_handle() const {
-        return m_task ? m_task->get_coroutine_handle() : std::coroutine_handle<>{};
-    }
-
-    explicit operator bool() const { return bool(m_task); }
-};
+namespace ynet::async::scheduling {
 
 template<typename T>
 class CircularBuffer {
@@ -83,8 +28,12 @@ public:
         m_buffer[index & m_mask] = std::move(item);
     }
 
-    T get(int64_t index) const noexcept {
+    const T& get(int64_t index) const noexcept {
         return m_buffer[index & m_mask];
+    }
+
+    T get(int64_t index) noexcept {
+        return std::move(m_buffer[index & m_mask]);
     }
 
     /**
@@ -116,7 +65,6 @@ private:
     size_t m_mask;                        // 用于快速取模的掩码 (capacity - 1)
     std::unique_ptr<T[]> m_buffer;        // 实际存储数组
 };
-
 
 /**
  * @brief 工作窃取队列
@@ -354,5 +302,8 @@ private:
 
 
 
-} // namespace ynet::runtime
+
+
+} // namespace ynet::async::scheduling
+
 

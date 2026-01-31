@@ -1,7 +1,6 @@
 #include <iostream>
 
 #include "async/task.hpp"
-#include "runtime/thread_pool.hpp"
 
 using ynet::async::Task;
 
