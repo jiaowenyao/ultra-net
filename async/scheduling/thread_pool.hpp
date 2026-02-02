@@ -119,6 +119,11 @@ public:
         if (!handle || handle.done()) {
             return;
         }
+
+        std::cout << "submit coroutine=" << handle.address()
+                  << ",is_done=" << handle.done()
+                  << ",tasks=" << (m_active_tasks.load() + 1) << std::endl;
+
         increment_tasks();
         // decrement_tasks在final_suspend中处理
         UnifiedTask task(handle);

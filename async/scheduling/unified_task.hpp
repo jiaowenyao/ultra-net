@@ -46,6 +46,8 @@ private:
             }
         }
 
+        ~CoroutineTask() {}
+
         bool is_coroutine() const noexcept override { return true; }
     };
 

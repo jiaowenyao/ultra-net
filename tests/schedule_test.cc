@@ -17,7 +17,7 @@ ynet::async::Task<void> print_num() {
 }
 
 ynet::async::Task<void> task() {
-    int cnt = 10;
+    int cnt = 5;
     for (int i = 0; i < cnt; ++i) {
         co_await print_num();
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
@@ -35,16 +35,17 @@ int main() {
 
     ynet::async::scheduling::WorkStealingThreadPool pool(4);
 
-    auto task = server();
+    ynet::async::ExecutionContext::Scope scope(&pool);
+
+    auto task1 = server();
+    auto task2 = server();
+
     // task.handle().resume();
 
-
-
-    pool.submit(task.handle());
+    pool.submit(task1.task());
+    pool.submit(task2.task());
 
     pool.wait_all();
-
-    // sleep(5);
 
     return 0;
 }

@@ -35,11 +35,14 @@ struct TaskPromiseBase {
             }
 
             if (promise.m_caller) {
+                auto parent = promise.m_caller;
+                promise.m_caller = nullptr;
                 // 调用者放入调度器
                 if (promise.m_creator_scheduler) {
-                    promise.m_creator_scheduler->submit(promise.m_caller);
+                    promise.m_creator_scheduler->submit(parent);
+                    return std::noop_coroutine();
                 }
-                return promise.m_caller;
+                return parent;
             }
 
             if (promise.m_ex != nullptr) [[unlikely]] {
@@ -168,7 +171,7 @@ public:
         : m_handle(handle) {}
 
     ~Task() {
-        if (m_handle) {
+        if (m_handle && m_handle.done()) {
             m_handle.destroy();
         }
     }
