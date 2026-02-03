@@ -29,19 +29,15 @@ struct TaskPromiseBase {
         template <typename T>
         std::coroutine_handle<> await_suspend(std::coroutine_handle<T> callee) const noexcept {
             auto& promise = callee.promise();
-            auto* pool = promise.m_creator_scheduler;
-            if (pool != nullptr) {
-                pool->decrement_tasks();
+            auto* scheduler = promise.m_creator_scheduler;
+            if (scheduler != nullptr) {
+                scheduler->decrement_tasks();
             }
 
-            if (promise.m_caller) {
-                auto parent = promise.m_caller;
-                promise.m_caller = nullptr;
-                // 调用者放入调度器
-                if (promise.m_creator_scheduler) {
-                    promise.m_creator_scheduler->submit(parent);
-                    return std::noop_coroutine();
-                }
+            std::coroutine_handle<> parent = promise.m_caller;
+            promise.m_caller = nullptr;
+
+            if (parent && !parent.done()) {
                 return parent;
             }
 
@@ -82,9 +78,9 @@ struct TaskPromiseBase {
     }
 
 
-    std::coroutine_handle<> m_caller = nullptr;
-    std::exception_ptr m_ex = nullptr;
-    Scheduler* m_creator_scheduler = nullptr;
+    std::atomic<std::coroutine_handle<>> m_caller{nullptr};
+    std::exception_ptr m_ex{nullptr};
+    Scheduler* m_creator_scheduler{nullptr};
 };
 
 template <typename T>
@@ -155,12 +151,20 @@ private:
         // 记录调用者，并跳转到被等待的协程
         template <typename PromiseType>
         std::coroutine_handle<> await_suspend(std::coroutine_handle<PromiseType> caller) {
-            m_callee.promise().m_caller = caller;
-            // 放入调度器
-            if (auto* scheduler = m_callee.promise().m_creator_scheduler) {
+            if (!m_callee || m_callee.done()) {
+                return caller;
+            }
+
+            auto& callee_promise = m_callee.promise();
+            auto& caller_promise = caller.promise();
+
+            callee_promise.m_caller.store(caller, std::memory_order_release);
+
+            if (auto* scheduler = callee_promise.m_creator_scheduler) {
                 scheduler->submit(m_callee);
                 return std::noop_coroutine();
             }
+
             return m_callee;
         }
     };
