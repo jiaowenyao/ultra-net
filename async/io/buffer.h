@@ -29,6 +29,9 @@ public:
 
     unsigned bgid() const noexcept;
 
+    size_t entries() const noexcept { return m_entries; }
+    size_t buf_size() const noexcept { return m_buf_size; }
+
 private:
     unsigned m_gid;
     size_t m_entries;

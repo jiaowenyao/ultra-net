@@ -2,6 +2,7 @@
 
 #include "async/scheduler.h"
 #include "async/execution_context.hpp"
+#include "async/io/io_context.hpp"
 #include "queue.hpp"
 #include <thread>
 #include <future>
@@ -287,6 +288,7 @@ private:
 
         // 设置执行上下文
         ExecutionContext::Scope context_scope(this);
+        io::IoUringContext::Scope io_uring_scope{};
 
         while (!m_stop.load(std::memory_order_acquire)) {
             std::optional<UnifiedTask> task;
