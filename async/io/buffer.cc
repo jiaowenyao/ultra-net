@@ -1,5 +1,7 @@
 #include "buffer.h"
 #include "io_context.hpp"
+#include <stdlib.h>
+#include <cassert>
 
 namespace ynet::async::io {
 
@@ -8,11 +10,19 @@ BufferGroup::BufferGroup(unsigned gid, size_t entries, size_t buf_size)
     , m_entries(entries)
     , m_buf_size(buf_size) {
 
+    assert((entries & (entries - 1)) == 0);
+
     // 1. 分配buffer内存
     m_buffers = std::make_unique<char[]>(entries * buf_size);
 
     // 2. 分配io_uring_buf数组（用于注册）
-    m_bufs = std::make_unique<io_uring_buf[]>(entries);
+    const size_t ring_size = entries * sizeof(io_uring_buf);
+    void* ring_mem = nullptr;
+    if (posix_memalign(&ring_mem, 4096, ring_size) != 0) {
+        throw std::bad_alloc();
+    }
+    m_bufs.reset(static_cast<io_uring_buf*>(ring_mem));
+    // m_bufs = std::make_unique<io_uring_buf[]>(entries);
 
     // 3. 初始化每个buffer
     for (size_t i = 0; i < entries; ++i) {

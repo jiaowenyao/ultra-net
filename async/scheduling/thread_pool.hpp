@@ -3,6 +3,7 @@
 #include "async/scheduler.h"
 #include "async/execution_context.hpp"
 #include "async/io/io_context.hpp"
+#include "async/io/io_callback.hpp"
 #include "queue.hpp"
 #include <thread>
 #include <future>
@@ -280,6 +281,22 @@ private:
         return false;
     }
 
+    void process_io_completions() {
+        auto* ctx = io::IoUringContext::current();
+        io_uring_cqe* cqe;
+        unsigned head;
+        unsigned processed = 0;
+        io_uring_for_each_cqe(ctx->get_ring(), head, cqe) {
+            auto* callback = reinterpret_cast<io::IoCallback*>(io_uring_cqe_get_data(cqe));
+            if (callback && !callback->m_completed) {
+                callback->m_result = cqe->res;
+                callback->m_completed = true;
+                if (callback->m_handle) {
+                    submit_coroutine(callback->m_handle);
+                }
+            }
+        }
+    }
 
     void worker_thread(size_t worker_id) {
         // 设置当前线程的工作ID
@@ -291,6 +308,9 @@ private:
         io::IoUringContext::Scope io_uring_scope{};
 
         while (!m_stop.load(std::memory_order_acquire)) {
+            // 首先检查当前线程的io_uring完成队列
+            process_io_completions();
+
             std::optional<UnifiedTask> task;
 
             // 策略1：从本地队列获取任务

@@ -61,6 +61,7 @@ Task<void> echo_server(int port) {
         std::cerr << "socket failed: " << sock.error().message() << std::endl;
         co_return;
     }
+    std::cout << "socket fd: " << *sock << std::endl;
     int listen_fd = *sock;
 
     // 3. bind

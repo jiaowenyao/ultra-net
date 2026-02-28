@@ -5,6 +5,7 @@
 #include <expected>
 #include <system_error>
 #include <functional>
+#include <iostream>
 
 
 namespace ynet::async::io {
@@ -58,6 +59,7 @@ public:
 
     void await_suspend(std::coroutine_handle<> handle) noexcept {
         m_callback.m_handle = handle;
+        std::cout << "await suspend" << std::endl;
         if (m_is_parent && m_sqe) {
             // 只有父操作才提交
             IoUringContext::current()->submit();
