@@ -33,6 +33,7 @@ set(TEST_SOURCES
 foreach(test_src ${TEST_SOURCES})
     get_filename_component(test_name ${test_src} NAME_WE)
     add_executable(${test_name} ${test_src})
+    target_include_directories(${test_name} PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR})
     target_link_libraries(${test_name}
         ultranet
         pthread

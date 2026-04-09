@@ -1,3 +1,5 @@
 // include/ultranet/core/execution_context.hpp
 #pragma once
-#include "../async/execution_context.hpp"
+
+// Wrapper header - actual implementation in src/execution_context.hpp
+#include "../../../src/execution_context.hpp"

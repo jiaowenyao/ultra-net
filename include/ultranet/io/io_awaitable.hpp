@@ -1,3 +1,5 @@
 // include/ultranet/io/io_awaitable.hpp
 #pragma once
-#include "../async/io/io_awaitable.hpp"
+
+// Wrapper header - actual implementation in src/io/io_awaitable.hpp
+#include "../../../src/io/io_awaitable.hpp"

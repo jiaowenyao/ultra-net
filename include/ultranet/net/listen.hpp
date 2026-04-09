@@ -1,3 +1,5 @@
 // include/ultranet/net/listen.hpp
 #pragma once
-#include "../net/op/listen.hpp"
+
+// Wrapper header - actual implementation in src/net/op/listen.hpp
+#include "../../../src/net/op/listen.hpp"

@@ -1,3 +1,5 @@
 // include/ultranet/net/socket.hpp
 #pragma once
-#include "../net/op/socket.hpp"
+
+// Wrapper header - actual implementation in src/net/op/socket.hpp
+#include "../../../src/net/op/socket.hpp"

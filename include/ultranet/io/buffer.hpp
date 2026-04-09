@@ -1,3 +1,5 @@
 // include/ultranet/io/buffer.hpp
 #pragma once
-#include "../async/io/buffer.h"
+
+// Wrapper header - actual implementation in src/io/buffer.h
+#include "../../../src/io/buffer.h"

@@ -1,3 +1,5 @@
 // include/ultranet/net/read.hpp
 #pragma once
-#include "../net/op/read.hpp"
+
+// Wrapper header - actual implementation in src/net/op/read.hpp
+#include "../../../src/net/op/read.hpp"

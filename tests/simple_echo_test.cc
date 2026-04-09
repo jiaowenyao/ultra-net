@@ -1,7 +1,7 @@
 // tests/simple_echo_test.cc - Simple echo test
-#include "async/task.hpp"
-#include "async/io/io_context.hpp"
-#include "async/io/buffer.h"
+#include "src/task.hpp"
+#include "src/io/io_context.hpp"
+#include "src/io/buffer.h"
 #include "net/op/socket.hpp"
 #include "net/op/listen.hpp"
 #include "net/op/accept.hpp"

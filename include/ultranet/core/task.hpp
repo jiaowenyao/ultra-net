@@ -1,5 +1,5 @@
 // include/ultranet/core/task.hpp
 #pragma once
 
-// Wrapper header - actual implementation in async/task.hpp
-#include "../async/task.hpp"
+// Wrapper header - actual implementation in src/task.hpp
+#include "../../../src/task.hpp"

@@ -1,3 +1,5 @@
 // include/ultranet/io/io_context.hpp
 #pragma once
-#include "../async/io/io_context.hpp"
+
+// Wrapper header - actual implementation in src/io/io_context.hpp
+#include "../../../src/io/io_context.hpp"

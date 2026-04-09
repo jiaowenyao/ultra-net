@@ -41,36 +41,36 @@ endif()
 
 # Create ultranet library
 set(ULTRANET_SOURCES
-    async/io/buffer.cc
+    src/io/buffer.cc
 )
 
-set(ULTRANET_HEADERS
-    async/io/buffer.h
-    async/io/io_awaitable.hpp
-    async/io/io_callback.hpp
-    async/io/io_context.hpp
-    async/scheduler.h
-    async/execution_context.hpp
-    async/task.hpp
-    async/scheduling/thread_pool.hpp
-    async/scheduling/queue.hpp
-    async/scheduling/unified_task.hpp
-    net/op/accept.hpp
-    net/op/close.hpp
-    net/op/connect.hpp
-    net/op/listen.hpp
-    net/op/read.hpp
-    net/op/socket.hpp
-    net/op/write.hpp
-    utils/noncopyable.h
+# Headers that users need (exposed via include/ultranet/)
+set(ULTRANET_PUBLIC_HEADERS
+    src/task.hpp
+    src/scheduler.h
+    src/execution_context.hpp
+    src/scheduling/thread_pool.hpp
+    src/scheduling/queue.hpp
+    src/scheduling/unified_task.hpp
+    src/io/io_context.hpp
+    src/io/io_awaitable.hpp
+    src/io/io_callback.hpp
+    src/io/buffer.h
+    src/net/op/socket.hpp
+    src/net/op/listen.hpp
+    src/net/op/accept.hpp
+    src/net/op/read.hpp
+    src/net/op/write.hpp
+    src/net/op/connect.hpp
+    src/net/op/close.hpp
 )
 
-add_library(ultranet ${ULTRANET_SOURCES} ${ULTRANET_HEADERS})
+add_library(ultranet ${ULTRANET_SOURCES} ${ULTRANET_PUBLIC_HEADERS})
 
 target_include_directories(ultranet
     PUBLIC
-        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
         $<INSTALL_INTERFACE:include>
     PRIVATE
         ${liburing_INCLUDE_DIRS}
@@ -88,9 +88,6 @@ target_compile_definitions(ultranet
         ULTRANET_VERSION_PATCH=${PROJECT_VERSION_PATCH}
 )
 
-# Create a header-only interface for just the public headers
-# This allows users to use find_package without building
-
 # Installation
 include(GNUInstallDirs)
 
@@ -101,11 +98,29 @@ install(TARGETS ultranet
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
 
-install(FILES ${ULTRANET_HEADERS}
+# Install public headers (from src/ to include/ultranet/)
+install(FILES
+        src/task.hpp
+        src/scheduler.h
+        src/execution_context.hpp
+        src/scheduling/thread_pool.hpp
+        src/scheduling/queue.hpp
+        src/scheduling/unified_task.hpp
+        src/io/io_context.hpp
+        src/io/io_awaitable.hpp
+        src/io/io_callback.hpp
+        src/io/buffer.h
+        src/net/op/socket.hpp
+        src/net/op/listen.hpp
+        src/net/op/accept.hpp
+        src/net/op/read.hpp
+        src/net/op/write.hpp
+        src/net/op/connect.hpp
+        src/net/op/close.hpp
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/ultranet
 )
 
-# Create directory structure headers
+# Install wrapper header
 install(FILES
         include/ultranet/ultranet.h
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/ultranet

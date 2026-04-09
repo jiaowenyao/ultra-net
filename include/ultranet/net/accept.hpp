@@ -1,3 +1,5 @@
 // include/ultranet/net/accept.hpp
 #pragma once
-#include "../net/op/accept.hpp"
+
+// Wrapper header - actual implementation in src/net/op/accept.hpp
+#include "../../../src/net/op/accept.hpp"

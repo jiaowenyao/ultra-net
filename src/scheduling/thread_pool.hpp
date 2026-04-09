@@ -1,9 +1,9 @@
 #pragma once
 
-#include "async/scheduler.h"
-#include "async/execution_context.hpp"
-#include "async/io/io_context.hpp"
-#include "async/io/io_callback.hpp"
+#include "src/scheduler.h"
+#include "src/execution_context.hpp"
+#include "src/io/io_context.hpp"
+#include "src/io/io_callback.hpp"
 #include "queue.hpp"
 #include <thread>
 #include <future>

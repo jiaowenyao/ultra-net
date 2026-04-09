@@ -1,3 +1,5 @@
 // include/ultranet/net/connect.hpp
 #pragma once
-#include "../net/op/connect.hpp"
+
+// Wrapper header - actual implementation in src/net/op/connect.hpp
+#include "../../../src/net/op/connect.hpp"

@@ -1,3 +1,5 @@
 // include/ultranet/net/close.hpp
 #pragma once
-#include "../net/op/close.hpp"
+
+// Wrapper header - actual implementation in src/net/op/close.hpp
+#include "../../../src/net/op/close.hpp"

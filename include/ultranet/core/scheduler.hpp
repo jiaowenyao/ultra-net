@@ -1,3 +1,5 @@
 // include/ultranet/core/scheduler.hpp
 #pragma once
-#include "../async/scheduler.h"
+
+// Wrapper header - actual implementation in src/scheduler.h
+#include "../../../src/scheduler.h"
