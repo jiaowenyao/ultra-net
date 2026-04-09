@@ -24,7 +24,9 @@ Task<void> echo_session(int fd) {
         // 2. 读取数据 - 直接返回内核缓冲区的span
         auto data = co_await reader;
         if (!data) {
-            break;  // 连接关闭或错误
+            std::cout << "read data==nullptr" << std::endl;
+            continue;
+            // break;  // 连接关闭或错误
         }
 
         // 3. 回写数据
@@ -88,8 +90,10 @@ Task<void> echo_server(int port) {
 
     while (true) {
         // 6. 接受连接
-        Accept connection(listen_fd, acceptor);
-        auto client = co_await connection;
+        // Accept connection(listen_fd, acceptor);
+        // auto client = co_await connection;
+        auto client = co_await acceptor;
+        std::cout << "end connection" << std::endl;
         if (!client) {
             if (client.error() == std::errc::operation_canceled) {
                 break;

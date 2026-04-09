@@ -39,13 +39,15 @@ public:
 
     // 统一的 resume 接口
     IoResult<int> resume() noexcept {
-        if (!m_is_parent) {
-            // 子操作：从父操作获取结果
-            return m_parent->get_connection();
-        }
-
         // 父操作：直接返回自己的结果
         if (m_callback.m_result < 0) {
+            // 处理 -EAGAIN 的情况
+            if (m_callback.m_result == -EAGAIN) {
+                return std::unexpected(make_io_error(EAGAIN));
+            }
+            if (m_callback.m_result == -EINTR) {
+                return std::unexpected(make_io_error(EINTR));
+            }
             return std::unexpected(make_io_error(m_callback.m_result));
         }
 
@@ -61,7 +63,7 @@ public:
     // 父操作：获取下一个连接（供子操作调用）
     IoResult<int> get_connection() noexcept {
         if (!m_is_parent) {
-            return std::unexpected(make_io_error(-EINVAL));
+            return std::unexpected(make_io_error(EINVAL));
         }
 
         if (m_callback.m_result < 0) {
@@ -78,16 +80,34 @@ public:
     }
 
     // 父操作：取消 multishot
-    bool cancel() noexcept override {
-        if (!m_is_parent) return false;
+    void cancel() noexcept override {
+        if (!m_is_parent) return;
 
         if (auto* sqe = IoUringContext::current()->get_sqe()) {
             io_uring_prep_cancel(sqe, &m_callback, 0);
             io_uring_sqe_set_data(sqe, nullptr);
-            IoUringContext::current()->submit();
+            IoUringContext::current()->increment_pending();
         }
 
-        return IoOperation<Accept>::cancel();
+        m_callback.m_result = -ECANCELED;
+        m_callback.m_completed = true;
+        if (m_callback.m_handle) {
+            m_callback.m_handle.resume();
+        }
+    }
+
+    // 重新提交
+    void resubmit() override {
+        if (m_is_parent && m_sqe) {
+            auto* ctx = IoUringContext::current();
+            auto* new_sqe = ctx->get_sqe();
+            if (new_sqe) {
+                *new_sqe = *m_sqe;
+                io_uring_sqe_set_data(new_sqe, &m_callback);
+                m_sqe = new_sqe;
+                ctx->increment_pending();
+            }
+        }
     }
 
 private:
@@ -98,6 +118,3 @@ private:
 
 
 } // namespace ynet::net::op
-
-
-

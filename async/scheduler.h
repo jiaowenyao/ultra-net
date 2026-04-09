@@ -5,6 +5,8 @@
 
 namespace ynet::async {
 
+// Scheduler 接口 - 运行时多态
+// 具体实现（如 WorkStealingThreadPool）使用 final 修饰符帮助编译器优化
 class Scheduler {
 public:
     virtual ~Scheduler() = default;
@@ -20,13 +22,14 @@ public:
 
     virtual size_t pending_tasks() const noexcept = 0;
 
-    // 让调度器自己实现increment和decrement
+    // 让调度器自己实现 increment 和 decrement
     virtual void increment_tasks() noexcept = 0;
 
     virtual void decrement_tasks() noexcept = 0;
+
+    // 统计接口
+    virtual size_t total_submitted_ops() const noexcept = 0;
+    virtual size_t total_completed_ops() const noexcept = 0;
 };
 
 } // namespace ynet::async
-
-
-

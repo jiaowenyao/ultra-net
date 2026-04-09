@@ -10,11 +10,12 @@
 #include <queue>
 #include <random>
 #include <iostream>
+#include <atomic>
 
 
 namespace ynet::async::scheduling {
 
-class WorkStealingThreadPool : public async::Scheduler {
+class WorkStealingThreadPool final : public Scheduler {
 public:
     explicit WorkStealingThreadPool(size_t num_threads = std::thread::hardware_concurrency())
         : m_stop(false)
@@ -39,22 +40,14 @@ public:
         }
     }
 
-    /**
-     * @brief 析构函数
-     *
-     * 等待所有任务完成后关闭线程池
-     */
-    ~WorkStealingThreadPool() {
-        // 设置停止标志
+    ~WorkStealingThreadPool() override {
         m_stop.store(true, std::memory_order_release);
 
-        // 唤醒所有等待的线程
         {
             std::lock_guard<std::mutex> lock(m_global_mutex);
             m_global_cv.notify_all();
         }
 
-        // 等待所有工作线程结束
         for (auto& worker : m_workers) {
             if (worker.joinable()) {
                 worker.join();
@@ -62,10 +55,10 @@ public:
         }
     }
 
-    // 禁用拷贝
     WorkStealingThreadPool(const WorkStealingThreadPool&) = delete;
     WorkStealingThreadPool& operator=(const WorkStealingThreadPool&) = delete;
 
+    // === Scheduler 接口实现 ===
     void submit(std::coroutine_handle<> handle) override {
         submit_coroutine(handle);
     }
@@ -90,13 +83,32 @@ public:
         }
 
         for (const auto& queue : m_local_queues) {
-            // 估计一下
             if (!queue->empty()) {
                 ++total;
             }
         }
         return total;
     }
+
+    void increment_tasks() noexcept override {
+        m_active_tasks.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    void decrement_tasks() noexcept override {
+        if (m_active_tasks.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+            std::lock_guard<std::mutex> lock(m_completion_mutex);
+            m_completion_cv.notify_all();
+        }
+    }
+
+    size_t total_submitted_ops() const noexcept override {
+        return m_stats.submitted_ops.load(std::memory_order_relaxed);
+    }
+
+    size_t total_completed_ops() const noexcept override {
+        return m_stats.completed_ops.load(std::memory_order_relaxed);
+    }
+    // === Scheduler 接口实现结束 ===
 
     template <typename Func>
     void submit_function(Func&& func) {
@@ -122,12 +134,7 @@ public:
             return;
         }
 
-        // std::cout << "submit coroutine=" << handle.address()
-        //           << ",is_done=" << handle.done()
-        //           << ",tasks=" << (m_active_tasks.load() + 1) << std::endl;
-
         increment_tasks();
-        // decrement_tasks在final_suspend中处理
         UnifiedTask task(handle);
 
         if (t_thread_local_state.pool == this &&
@@ -141,32 +148,16 @@ public:
         }
     }
 
-    /**
-     * @brief 提交任务到线程池
-     * @tparam F 可调用对象类型
-     * @tparam Args 参数类型
-     * @param f 可调用对象
-     * @param args 参数
-     * @return std::future 用于获取任务结果
-     *
-     * 使用示例：
-     * @code
-     * auto future = pool.submit_with_result([]() { return 42; });
-     * int result = future.get();  // 阻塞等待结果
-     * @endcode
-     */
     template<typename F, typename... Args>
     auto submit_with_result(F&& f, Args&&... args)
         -> std::future<std::invoke_result_t<F, Args...>> {
 
         using ReturnType = std::invoke_result_t<F, Args...>;
 
-        // 创建 packaged_task 来包装任务
         auto task = std::make_shared<std::packaged_task<ReturnType()>>(
             std::bind(std::forward<F>(f), std::forward<Args>(args)...)
         );
 
-        // 获取 future
         std::future<ReturnType> result = task->get_future();
 
         submit_function([task]() mutable {
@@ -176,10 +167,6 @@ public:
         return result;
     }
 
-    /**
-     * @brief 等待所有任务完成
-     * 阻塞直到所有提交的任务都执行完毕
-     */
     void wait_all() {
         std::unique_lock<std::mutex> lock(m_completion_mutex);
         m_completion_cv.wait(lock, [this] {
@@ -203,33 +190,28 @@ public:
         return t_thread_local_state.pool;
     }
 
-    /**
-     * @brief 获取线程池中的线程数量
-     */
     size_t num_threads() const noexcept {
         return m_workers.size();
     }
 
-    /**
-     * @brief 获取活跃任务数量
-     */
     size_t active_tasks() const noexcept {
         return m_active_tasks.load(std::memory_order_relaxed);
     }
 
-protected:
-    void increment_tasks() noexcept override {
-        m_active_tasks.fetch_add(1, std::memory_order_relaxed);
+    void record_submit() noexcept {
+        m_stats.submitted_ops.fetch_add(1, std::memory_order_relaxed);
     }
 
-    void decrement_tasks() noexcept override {
-        if (m_active_tasks.fetch_sub(1, std::memory_order_acq_rel) == 1) {
-            std::lock_guard<std::mutex> lock(m_completion_mutex);
-            m_completion_cv.notify_all();
-        }
+    void record_completion() noexcept {
+        m_stats.completed_ops.fetch_add(1, std::memory_order_relaxed);
     }
 
 private:
+    struct Stats {
+        std::atomic<size_t> submitted_ops{0};
+        std::atomic<size_t> completed_ops{0};
+    };
+
     std::optional<UnifiedTask> try_get_local_task(size_t worker_id) {
         if (auto task = m_local_queues[worker_id]->pop()) {
             return task;
@@ -248,7 +230,6 @@ private:
         std::uniform_int_distribution<size_t> dist(0, num_workers - 1);
         size_t start = dist(rng);
 
-        // 遍历所有其他线程的队列
         for (size_t i = 0; i < num_workers; ++i) {
             size_t victim = (start + i) % num_workers;
 
@@ -256,7 +237,6 @@ private:
                 continue;
             }
 
-            // 尝试窃取
             if (auto opt_task = m_local_queues[victim]->steal()) {
                 task = std::move(*opt_task);
                 return true;
@@ -266,11 +246,6 @@ private:
         return false;
     }
 
-    /**
-     * @brief 尝试从全局队列获取任务
-     * @param task 输出参数，获取到的任务
-     * @return 是否获取成功
-     */
     bool try_get_from_global(std::optional<UnifiedTask>& task) {
         std::lock_guard<std::mutex> lock(m_global_mutex);
         if (!m_global_queue.empty()) {
@@ -283,75 +258,77 @@ private:
 
     void process_io_completions() {
         auto* ctx = io::IoUringContext::current();
+        if (!ctx) return;
+
         io_uring_cqe* cqe;
         unsigned head;
         unsigned processed = 0;
-        io_uring_for_each_cqe(ctx->get_ring(), head, cqe) {
+        io_uring* ring = ctx->get_ring();
+
+        io_uring_for_each_cqe(ring, head, cqe) {
+            ++processed;
             auto* callback = reinterpret_cast<io::IoCallback*>(io_uring_cqe_get_data(cqe));
-            if (callback && !callback->m_completed) {
+            if (callback) {
                 callback->m_result = cqe->res;
                 callback->m_completed = true;
-                if (callback->m_handle) {
+
+                // 处理 -EAGAIN / -EINTR：需要重新提交操作
+                if (cqe->res == -EAGAIN || cqe->res == -EINTR) {
+                    // 重新提交操作
+                    if (callback->m_operation) {
+                        auto* op = static_cast<io::IoOperationBase*>(callback->m_operation);
+                        op->resubmit();
+                    }
+                    // 不恢复协程，等待重新完成
+                } else if (callback->m_handle) {
+                    record_completion();
                     submit_coroutine(callback->m_handle);
                 }
             }
+            io_uring_cqe_seen(ring, cqe);
         }
     }
 
     void worker_thread(size_t worker_id) {
-        // 设置当前线程的工作ID
         t_thread_local_state.pool = this;
         t_thread_local_state.worker_id = worker_id;
 
-        // 设置执行上下文
         ExecutionContext::Scope context_scope(this);
         io::IoUringContext::Scope io_uring_scope{};
 
         while (!m_stop.load(std::memory_order_acquire)) {
-            // 首先检查当前线程的io_uring完成队列
             process_io_completions();
 
             std::optional<UnifiedTask> task;
 
-            // 策略1：从本地队列获取任务
             if ((task = try_get_local_task(worker_id))) {
                 (*task)();
                 continue;
             }
 
-            // 策略2：尝试窃取其他线程的任务
             if (try_steal_task(worker_id, task)) {
                 (*task)();
                 continue;
             }
 
-            // 策略3：从全局队列获取任务
             if (try_get_from_global(task)) {
                 (*task)();
                 continue;
             }
 
-            // 策略4：等待新任务
             wait_for_task();
         }
 
-        // 线程结束前，处理剩余的本地任务
         while (auto opt_task = m_local_queues[worker_id]->pop()) {
             (*opt_task)();
         }
 
-        // 清理线程局部状态
         t_thread_local_state.pool = nullptr;
         t_thread_local_state.worker_id = static_cast<size_t>(-1);
     }
 
-    /**
-     * @brief 等待新任务
-     * 当没有任务可执行时，线程进入等待状态以节省CPU
-     */
     void wait_for_task() {
         std::unique_lock<std::mutex> lock(m_global_mutex);
-        // 使用带超时的等待，定期检查是否应该停止
         m_global_cv.wait_for(lock, std::chrono::milliseconds(10), [this] {
             return m_stop.load(std::memory_order_relaxed) ||
                    !m_global_queue.empty();
@@ -359,25 +336,17 @@ private:
     }
 
 private:
-    // 工作线程列表
     std::vector<std::thread> m_workers;
-    // 每个工作线程的本地队列
     std::vector<std::unique_ptr<WorkStealingQueue<UnifiedTask>>> m_local_queues;
-    // 全局任务队列（用于外部提交的任务）
     std::queue<UnifiedTask> m_global_queue;
-    // 全局队列的互斥锁
     mutable std::mutex m_global_mutex;
-    // 全局队列的条件变量
     std::condition_variable m_global_cv;
-    // 停止标志（必须在 active_tasks_ 之前声明，因为构造函数初始化顺序）
     std::atomic<bool> m_stop;
-    // 任务完成相关
     std::mutex m_completion_mutex;
     std::condition_variable m_completion_cv;
     std::atomic<size_t> m_active_tasks;
+    Stats m_stats{};
 
-
-    // 线程局部存储
     struct ThreadLocalState {
         WorkStealingThreadPool* pool = nullptr;
         size_t worker_id = static_cast<size_t>(-1);
@@ -385,14 +354,6 @@ private:
     static thread_local ThreadLocalState t_thread_local_state;
 };
 
-// 线程局部变量定义（需要在cpp文件中或者使用inline）
 inline thread_local WorkStealingThreadPool::ThreadLocalState WorkStealingThreadPool::t_thread_local_state{};
 
-
-
-
-
-
 } // namespace ynet::async::scheduling
-
-

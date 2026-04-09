@@ -1,0 +1,2 @@
+add_executable(pool_test pool_test.cc)
+target_link_libraries(pool_test ultra-net)
