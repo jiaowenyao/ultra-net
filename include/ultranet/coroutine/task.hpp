@@ -4,8 +4,8 @@
 #include <optional>
 #include <assert.h>
 #include <format>
-#include "utils/noncopyable.h"
-#include "scheduling/thread_pool.hpp"
+#include "ultranet/utils/noncopyable.h"
+#include "thread_pool.hpp"
 
 
 namespace ynet::async {

@@ -1,7 +1,7 @@
 
 add_library(
     ultra-net
-    ./io/buffer.cc
+    ./buffer/buffer.cc
 )
 
 target_link_libraries(

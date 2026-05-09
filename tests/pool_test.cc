@@ -1,7 +1,7 @@
 // tests/pool_test.cc - Thread pool test without sockets
-#include "src/task.hpp"
-#include "src/io/io_context.hpp"
-#include "src/scheduling/thread_pool.hpp"
+#include "ultranet/coroutine/task.hpp"
+#include "ultranet/io/io_engine.hpp"
+#include "ultranet/coroutine/thread_pool.hpp"
 #include <iostream>
 #include <atomic>
 #include <chrono>

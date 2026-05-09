@@ -1,13 +1,13 @@
 // examples/echo_server.cpp
-#include "src/task.hpp"
-#include "src/io/io_context.hpp"
-#include "src/io/buffer.h"
-#include "net/op/socket.hpp"
-#include "net/op/listen.hpp"
-#include "net/op/accept.hpp"
-#include "net/op/read.hpp"
-#include "net/op/write.hpp"
-#include "net/op/close.hpp"
+#include "ultranet/coroutine/task.hpp"
+#include "ultranet/io/io_engine.hpp"
+#include "ultranet/buffer/buffer.h"
+#include "ultranet/net/socket.hpp"
+#include "ultranet/net/listen.hpp"
+#include "ultranet/net/accept.hpp"
+#include "ultranet/net/read.hpp"
+#include "ultranet/net/write.hpp"
+#include "ultranet/net/close.hpp"
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <string.h>
@@ -46,12 +46,12 @@ Task<void> echo_session(int fd) {
 Task<void> echo_server(int port) {
     // 1. 注册buffer group（1024个buffer，每个4K）
     // 纯BufferGroup，一次注册，永久使用
-    auto ctx = IoUringContext::current();
+    auto ctx = IoUringEngine::current();
     if (ctx == nullptr) {
         std::cout << "ctx is nullptr" << std::endl;
         exit(1);
     }
-    auto& bg = IoUringContext::current()->register_buffer_group(1, 1024, 4096);
+    auto& bg = IoUringEngine::current()->register_buffer_group(1, 1024, 4096);
 
     std::cout << "BufferGroup registered: gid=" << bg.bgid() 
               << ", entries=" << bg.entries() 

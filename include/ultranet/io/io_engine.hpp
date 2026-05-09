@@ -5,7 +5,7 @@
 #include <unordered_map>
 #include <memory>
 #include <atomic>
-#include "buffer.h"
+#include "ultranet/buffer/buffer.h"
 
 namespace ynet::async::io {
 
@@ -13,10 +13,10 @@ inline constexpr size_t IOURING_DEFAULT_ENTRIES = 1024;
 inline constexpr size_t BATCH_SUBMIT_THRESHOLD = 64;
 
 
-class IoUringContext;
+class IoUringEngine;
 class BufferGroup;
 
-struct IoUringContextConfig {
+struct IoUringEngineConfig {
     size_t entries = IOURING_DEFAULT_ENTRIES;
     uint32_t flags = 0;
     bool enable_sq_poll = false;      // 是否启用SQ轮询
@@ -27,11 +27,11 @@ struct IoUringContextConfig {
 };
 
 
-class IoUringContext {
+class IoUringEngine {
 public:
-    using Config = IoUringContextConfig;
+    using Config = IoUringEngineConfig;
 
-    static IoUringContext* current() noexcept {
+    static IoUringEngine* current() noexcept {
         return t_current_context;
     }
 
@@ -41,7 +41,7 @@ public:
 
     static void init_thread_local(const Config& config = Config{}) {
         if (!t_current_context) {
-            t_current_context = new IoUringContext(config);
+            t_current_context = new IoUringEngine(config);
         }
     }
 
@@ -183,7 +183,7 @@ public:
     }
 
 private:
-    explicit IoUringContext(const Config& config)
+    explicit IoUringEngine(const Config& config)
         : m_config(config) {
         io_uring_params params{};
         params.flags = config.flags;
@@ -204,7 +204,7 @@ private:
         }
     }
 
-    ~IoUringContext() {
+    ~IoUringEngine() {
         // 确保提交所有待处理的 SQE
         if (m_ring.ring_fd >= 0) {
             io_uring_submit(&m_ring);
@@ -212,8 +212,8 @@ private:
         }
     }
 
-    IoUringContext(const IoUringContext&) = delete;
-    IoUringContext& operator=(const IoUringContext&) = delete;
+    IoUringEngine(const IoUringEngine&) = delete;
+    IoUringEngine& operator=(const IoUringEngine&) = delete;
 
     struct Stats {
         std::atomic<size_t> submitted{0};
@@ -226,10 +226,10 @@ private:
     std::unordered_map<unsigned, std::unique_ptr<BufferGroup>> m_buffer_groups;
     std::atomic<size_t> m_pending_sqes{0};
     Stats m_stats{};
-    static thread_local IoUringContext* t_current_context;
+    static thread_local IoUringEngine* t_current_context;
 };
 
-inline thread_local IoUringContext* IoUringContext::t_current_context = nullptr;
+inline thread_local IoUringEngine* IoUringEngine::t_current_context = nullptr;
 
 
 } // namespace ynet::async::io

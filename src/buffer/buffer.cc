@@ -1,5 +1,5 @@
-#include "buffer.h"
-#include "io_context.hpp"
+#include "ultranet/buffer/buffer.h"
+#include "ultranet/io/io_engine.hpp"
 #include <stdlib.h>
 #include <cassert>
 
@@ -44,7 +44,7 @@ BufferGroup::BufferGroup(unsigned gid, size_t entries, size_t buf_size)
     };
 
     // 5. 注册到io_uring
-    auto* ring = IoUringContext::current()->get_ring();
+    auto* ring = IoUringEngine::current()->get_ring();
     int ret = io_uring_register_buf_ring(ring, &m_reg, 0);
     if (ret < 0) {
         throw std::system_error(-ret, std::system_category(), 
@@ -53,7 +53,7 @@ BufferGroup::BufferGroup(unsigned gid, size_t entries, size_t buf_size)
 }
 
 BufferGroup::~BufferGroup() {
-    auto* ring = IoUringContext::current()->get_ring();
+    auto* ring = IoUringEngine::current()->get_ring();
     io_uring_unregister_buf_ring(ring, m_gid);
 }
 

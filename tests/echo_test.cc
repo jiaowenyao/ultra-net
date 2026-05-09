@@ -1,14 +1,14 @@
 // tests/echo_test.cc - Echo server/client test
-#include "src/task.hpp"
-#include "src/io/io_context.hpp"
-#include "src/io/buffer.h"
-#include "net/op/socket.hpp"
-#include "net/op/listen.hpp"
-#include "net/op/accept.hpp"
-#include "net/op/read.hpp"
-#include "net/op/write.hpp"
-#include "net/op/connect.hpp"
-#include "net/op/close.hpp"
+#include "ultranet/coroutine/task.hpp"
+#include "ultranet/io/io_engine.hpp"
+#include "ultranet/buffer/buffer.h"
+#include "ultranet/net/socket.hpp"
+#include "ultranet/net/listen.hpp"
+#include "ultranet/net/accept.hpp"
+#include "ultranet/net/read.hpp"
+#include "ultranet/net/write.hpp"
+#include "ultranet/net/connect.hpp"
+#include "ultranet/net/close.hpp"
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -72,7 +72,7 @@ Task<void> echo_session(int fd) {
 
 // Echo 服务器
 Task<void> echo_server(int port, scheduling::WorkStealingThreadPool& pool) {
-    auto ctx = IoUringContext::current();
+    auto ctx = IoUringEngine::current();
     if (!ctx) {
         std::cerr << "No io_uring context" << std::endl;
         co_return;
@@ -135,7 +135,7 @@ Task<void> echo_server(int port, scheduling::WorkStealingThreadPool& pool) {
 
 // 简单的 TCP 客户端
 Task<void> tcp_client(int port) {
-    auto ctx = IoUringContext::current();
+    auto ctx = IoUringEngine::current();
     if (!ctx) co_return;
 
     ctx->register_buffer_group(2, 64, 4096);

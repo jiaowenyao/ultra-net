@@ -41,28 +41,28 @@ endif()
 
 # Create ultranet library
 set(ULTRANET_SOURCES
-    src/io/buffer.cc
+    src/buffer/buffer.cc
 )
 
 # Headers that users need (exposed via include/ultranet/)
 set(ULTRANET_PUBLIC_HEADERS
-    src/task.hpp
     src/scheduler.h
     src/execution_context.hpp
-    src/scheduling/thread_pool.hpp
-    src/scheduling/queue.hpp
-    src/scheduling/unified_task.hpp
-    src/io/io_context.hpp
-    src/io/io_awaitable.hpp
-    src/io/io_callback.hpp
-    src/io/buffer.h
-    src/net/op/socket.hpp
-    src/net/op/listen.hpp
-    src/net/op/accept.hpp
-    src/net/op/read.hpp
-    src/net/op/write.hpp
-    src/net/op/connect.hpp
-    src/net/op/close.hpp
+    include/ultranet/coroutine/task.hpp
+    include/ultranet/coroutine/thread_pool.hpp
+    include/ultranet/coroutine/queue.hpp
+    include/ultranet/coroutine/unified_task.hpp
+    include/ultranet/io/io_engine.hpp
+    include/ultranet/io/io_awaitable.hpp
+    include/ultranet/io/io_callback.hpp
+    include/ultranet/buffer/buffer.h
+    include/ultranet/net/socket.hpp
+    include/ultranet/net/listen.hpp
+    include/ultranet/net/accept.hpp
+    include/ultranet/net/read.hpp
+    include/ultranet/net/write.hpp
+    include/ultranet/net/connect.hpp
+    include/ultranet/net/close.hpp
 )
 
 add_library(ultranet ${ULTRANET_SOURCES} ${ULTRANET_PUBLIC_HEADERS})
@@ -100,23 +100,23 @@ install(TARGETS ultranet
 
 # Install public headers (from src/ to include/ultranet/)
 install(FILES
-        src/task.hpp
+        ultranet/coroutine/task.hpp
         src/scheduler.h
         src/execution_context.hpp
-        src/scheduling/thread_pool.hpp
-        src/scheduling/queue.hpp
-        src/scheduling/unified_task.hpp
-        src/io/io_context.hpp
-        src/io/io_awaitable.hpp
-        src/io/io_callback.hpp
-        src/io/buffer.h
-        src/net/op/socket.hpp
-        src/net/op/listen.hpp
-        src/net/op/accept.hpp
-        src/net/op/read.hpp
-        src/net/op/write.hpp
-        src/net/op/connect.hpp
-        src/net/op/close.hpp
+        ultranet/coroutine/thread_pool.hpp
+        ultranet/coroutine/queue.hpp
+        ultranet/coroutine/unified_task.hpp
+        ultranet/io/io_engine.hpp
+        ultranet/io/io_awaitable.hpp
+        ultranet/io/io_callback.hpp
+        ultranet/buffer/buffer.h
+        ultranet/net/socket.hpp
+        ultranet/net/listen.hpp
+        ultranet/net/accept.hpp
+        ultranet/net/read.hpp
+        ultranet/net/write.hpp
+        ultranet/net/connect.hpp
+        ultranet/net/close.hpp
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/ultranet
 )
 

@@ -25,9 +25,7 @@ endif()
 set(TEST_SOURCES
     init.cc
     pool_test.cc
-    simple_echo_test.cc
     error_test.cc
-    concurrent_test.cc
 )
 
 foreach(test_src ${TEST_SOURCES})

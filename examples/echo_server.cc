@@ -10,7 +10,7 @@
 #include <arpa/inet.h>
 #include <sys/socket.h>
 #include <unistd.h>
-#include "../include/ultranet/io/io_context.hpp"
+#include "ultranet/io/io_engine.hpp"
 
 using namespace ynet::async::io;
 
@@ -27,7 +27,7 @@ int main(int argc, char* argv[]) {
     std::signal(SIGTERM, signal_handler);
 
     // Init io_uring context
-    IoUringContext::Scope scope;
+    IoUringEngine::Scope scope;
 
     std::cout << "Creating server socket..." << std::endl;
 
@@ -61,7 +61,7 @@ int main(int argc, char* argv[]) {
     std::cout << "Echo server listening on port " << port << std::endl;
 
     // Register buffer group for zero-copy I/O
-    auto& bg = IoUringContext::current()->register_buffer_group(1, 1024, 4096);
+    auto& bg = IoUringEngine::current()->register_buffer_group(1, 1024, 4096);
     (void)bg;
 
     // Simple accept loop

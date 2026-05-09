@@ -1,14 +1,14 @@
 // tests/error_test.cc - Error path tests
-#include "src/task.hpp"
-#include "src/io/io_context.hpp"
-#include "src/io/buffer.h"
-#include "net/op/socket.hpp"
-#include "net/op/listen.hpp"
-#include "net/op/accept.hpp"
-#include "net/op/read.hpp"
-#include "net/op/write.hpp"
-#include "net/op/connect.hpp"
-#include "net/op/close.hpp"
+#include "ultranet/coroutine/task.hpp"
+#include "ultranet/io/io_engine.hpp"
+#include "ultranet/buffer/buffer.h"
+#include "ultranet/net/socket.hpp"
+#include "ultranet/net/listen.hpp"
+#include "ultranet/net/accept.hpp"
+#include "ultranet/net/read.hpp"
+#include "ultranet/net/write.hpp"
+#include "ultranet/net/connect.hpp"
+#include "ultranet/net/close.hpp"
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -84,8 +84,8 @@ void test_socketpair() {
 void test_buffer_group() {
     std::cout << "Test: Buffer group creation... " << std::flush;
 
-    io::IoUringContext::Scope ctx_scope{};
-    auto ctx = io::IoUringContext::current();
+    io::IoUringEngine::Scope ctx_scope{};
+    auto ctx = io::IoUringEngine::current();
     if (!ctx) {
         std::cout << "SKIP (no ctx)" << std::endl;
         return;

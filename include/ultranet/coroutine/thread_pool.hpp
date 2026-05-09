@@ -2,8 +2,8 @@
 
 #include "src/scheduler.h"
 #include "src/execution_context.hpp"
-#include "src/io/io_context.hpp"
-#include "src/io/io_callback.hpp"
+#include "ultranet/io/io_engine.hpp"
+#include "ultranet/io/io_callback.hpp"
 #include "queue.hpp"
 #include <thread>
 #include <future>
@@ -257,7 +257,7 @@ private:
     }
 
     void process_io_completions() {
-        auto* ctx = io::IoUringContext::current();
+        auto* ctx = io::IoUringEngine::current();
         if (!ctx) return;
 
         io_uring_cqe* cqe;
@@ -294,7 +294,7 @@ private:
         t_thread_local_state.worker_id = worker_id;
 
         ExecutionContext::Scope context_scope(this);
-        io::IoUringContext::Scope io_uring_scope{};
+        io::IoUringEngine::Scope io_uring_scope{};
 
         while (!m_stop.load(std::memory_order_acquire)) {
             process_io_completions();
