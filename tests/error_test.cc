@@ -1,3 +1,4 @@
+#include "ultranet/coroutine/thread_pool.hpp"
 // tests/error_test.cc - Error path tests
 #include "ultranet/coroutine/task.hpp"
 #include "ultranet/io/io_engine.hpp"

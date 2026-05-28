@@ -5,6 +5,7 @@
 #include <expected>
 #include <system_error>
 #include <functional>
+#include <chrono>
 #include <iostream>
 #include <atomic>
 
@@ -22,24 +23,18 @@ using IoResult = std::expected<T, std::error_code>;
 template <typename Derived>
 class IoOperation : public IoOperationBase {
 protected:
-    // 父操作构造函数：创建SQE并设置数据
     template <typename F, typename... Args>
         requires std::is_invocable_v<F, io_uring_sqe*, Args...>
     IoOperation(F&& f, Args... args)
-        : m_sqe(IoUringEngine::current()->get_sqe()) {
-        if (m_sqe) [[likely]] {
-            std::invoke(std::forward<F>(f), m_sqe, std::forward<Args>(args)...);
-            io_uring_sqe_set_data(m_sqe, &m_callback);
-            m_callback.m_operation = this;
-            m_is_parent = true;
-        }
-        else {
-            m_callback.m_result = -ENOBUFS;
-            m_callback.m_completed = true;
-        }
+        : m_setup_fn([f = std::decay_t<F>(std::forward<F>(f)),
+                       ...args = std::decay_t<Args>(std::forward<Args>(args))]
+                      (io_uring_sqe* sqe) mutable {
+            std::invoke(f, sqe, args...);
+          }) {
+        m_callback.m_operation = this;
+        m_is_parent = true;
     }
 
-    // 子操作构造函数：不创建SQE
     IoOperation() noexcept = default;
 
 public:
@@ -49,51 +44,91 @@ public:
     IoOperation(IoOperation&&) = delete;
     IoOperation& operator=(IoOperation&&) = delete;
 
-    virtual ~IoOperation() = default;
+    ~IoOperation() override = default;
 
-    // awaitable 接口
+    Derived& with_timeout(std::chrono::nanoseconds duration) noexcept {
+        m_callback.set_timeout(duration);
+        return static_cast<Derived&>(*this);
+    }
+
     bool await_ready() const noexcept {
         return m_callback.m_completed;
     }
 
     void await_suspend(std::coroutine_handle<> handle) noexcept {
         m_callback.m_handle = handle;
+        if (!m_is_parent) return;
 
-        if (m_is_parent && m_sqe) {
-            // 批量提交：增加待提交计数
-            auto* ctx = IoUringEngine::current();
+        auto* ctx = IoUringEngine::current();
+
+        if (m_callback.m_has_deadline) {
+            auto* timeout_sqe = ctx->get_sqe();
+            if (timeout_sqe) {
+                struct __kernel_timespec ts = make_rel_timespec(m_callback.m_deadline);
+                io_uring_prep_timeout(timeout_sqe, &ts, 0, 0);
+                timeout_sqe->flags |= IOSQE_IO_LINK;
+                io_uring_sqe_set_data(timeout_sqe, nullptr);
+                ctx->increment_pending();
+                m_has_timeout_sqe = true;
+            }
+        }
+
+        m_sqe = ctx->get_sqe();
+        if (m_sqe) [[likely]] {
+            m_setup_fn(m_sqe);
+            io_uring_sqe_set_data(m_sqe, &m_callback);
             ctx->increment_pending();
 
-            // 检查是否达到批量阈值
+            if (ctx->should_submit()) {
+                ctx->submit();
+            }
+        } else {
+            m_callback.m_result = -ENOBUFS;
+            m_callback.m_completed = true;
+        }
+    }
+
+    auto await_resume() {
+        if (m_callback.m_has_deadline && m_callback.m_result == -ECANCELED) {
+            m_callback.m_result = -ETIMEDOUT;
+        }
+        return static_cast<Derived*>(this)->resume();
+    }
+
+    void resubmit() override {
+        if (!m_is_parent) return;
+        if (m_callback.m_has_deadline && m_callback.is_expired()) {
+            m_callback.m_result = -ETIMEDOUT;
+            m_callback.m_completed = true;
+            return;
+        }
+
+        auto* ctx = IoUringEngine::current();
+
+        if (m_callback.m_has_deadline && !m_has_timeout_sqe) {
+            auto* timeout_sqe = ctx->get_sqe();
+            if (timeout_sqe) {
+                struct __kernel_timespec ts = make_rel_timespec(m_callback.m_deadline);
+                io_uring_prep_timeout(timeout_sqe, &ts, 0, 0);
+                timeout_sqe->flags |= IOSQE_IO_LINK;
+                io_uring_sqe_set_data(timeout_sqe, nullptr);
+                ctx->increment_pending();
+                m_has_timeout_sqe = true;
+            }
+        }
+
+        auto* new_sqe = ctx->get_sqe();
+        if (new_sqe) {
+            *new_sqe = *m_sqe;
+            io_uring_sqe_set_data(new_sqe, &m_callback);
+            m_sqe = new_sqe;
+            ctx->increment_pending();
             if (ctx->should_submit()) {
                 ctx->submit();
             }
         }
     }
 
-    auto await_resume() {
-        return static_cast<Derived*>(this)->resume();
-    }
-
-    // 重新提交（用于 -EAGAIN / -EINTR）
-    void resubmit() override {
-        if (m_is_parent && m_sqe) {
-            auto* ctx = IoUringEngine::current();
-            auto* new_sqe = ctx->get_sqe();
-            if (new_sqe) {
-                // 复制原 SQE 的内容
-                *new_sqe = *m_sqe;
-                io_uring_sqe_set_data(new_sqe, &m_callback);
-                m_sqe = new_sqe;
-                ctx->increment_pending();
-                if (ctx->should_submit()) {
-                    ctx->submit();
-                }
-            }
-        }
-    }
-
-    // 取消操作
     void cancel() override {
         if (!m_is_parent || !m_sqe || m_callback.m_completed) {
             return;
@@ -115,7 +150,24 @@ public:
 
 protected:
     io_uring_sqe* m_sqe{nullptr};
-    bool m_is_parent{false};  // true: 拥有SQE, false: 等待父操作结果
+    bool m_is_parent{false};
+
+private:
+    std::function<void(io_uring_sqe*)> m_setup_fn;
+    bool m_has_timeout_sqe{false};
+
+    static struct __kernel_timespec make_rel_timespec(
+        std::chrono::steady_clock::time_point deadline) noexcept {
+        using namespace std::chrono;
+        auto now = steady_clock::now();
+        if (deadline <= now) {
+            return {0, 1};
+        }
+        auto diff = deadline - now;
+        auto sec = duration_cast<seconds>(diff);
+        auto nsec = duration_cast<nanoseconds>(diff - sec);
+        return {sec.count(), nsec.count()};
+    }
 };
 
 } // namespace ynet::async::io

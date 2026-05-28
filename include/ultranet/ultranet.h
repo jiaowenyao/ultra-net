@@ -10,37 +10,32 @@
  * - Zero-copy buffer management with buffer groups
  * - Batch submission for high throughput
  * - Multishot accept/read operations
+ * - Event-driven waiting via eventfd
+ * - Operation timeouts via IORING_OP_TIMEOUT
  *
  * Example usage:
  *
- *   // Create io_uring context
- *   IoUringContext::Scope scope;
- *
- *   // Register buffer group
- *   auto& bg = IoUringContext::current()->register_buffer_group(1, 1024, 4096);
- *
- *   // Read data with co_await
- *   Read reader(fd, 1);
- *   auto data = co_await reader;
- *
- *   // Write data with co_await
- *   co_await Write(fd, data->data(), data->size());
+ *   WorkStealingThreadPool pool(4);
+ *   pool.submit(my_coroutine().task());
+ *   pool.wait_all();
  */
 
-#include <ultranet/core/task.hpp>
-#include <ultranet/core/scheduler.hpp>
-#include <ultranet/core/execution_context.hpp>
-#include <ultranet/io/io_engine.hpp>
-#include <ultranet/io/buffer.hpp>
-#include <ultranet/io/io_callback.hpp>
-#include <ultranet/io/io_awaitable.hpp>
-#include <ultranet/net/socket.hpp>
-#include <ultranet/net/listen.hpp>
-#include <ultranet/net/accept.hpp>
-#include <ultranet/net/read.hpp>
-#include <ultranet/net/write.hpp>
-#include <ultranet/net/close.hpp>
-#include <ultranet/net/connect.hpp>
+#include "ultranet/coroutine/task.hpp"
+#include "ultranet/coroutine/thread_pool.hpp"
+#include "scheduler.h"
+#include "execution_context.hpp"
+#include "ultranet/io/io_engine.hpp"
+#include "ultranet/io/io_callback.hpp"
+#include "ultranet/io/io_awaitable.hpp"
+#include "ultranet/io/timer.hpp"
+#include "ultranet/buffer/buffer.h"
+#include "ultranet/net/socket.hpp"
+#include "ultranet/net/listen.hpp"
+#include "ultranet/net/accept.hpp"
+#include "ultranet/net/read.hpp"
+#include "ultranet/net/write.hpp"
+#include "ultranet/net/close.hpp"
+#include "ultranet/net/connect.hpp"
 
 // Version information
 #define ULTRANET_VERSION_MAJOR 0

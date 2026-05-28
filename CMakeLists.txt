@@ -54,6 +54,7 @@ set(ULTRANET_PUBLIC_HEADERS
     include/ultranet/coroutine/unified_task.hpp
     include/ultranet/io/io_engine.hpp
     include/ultranet/io/io_awaitable.hpp
+    include/ultranet/io/timer.hpp
     include/ultranet/io/io_callback.hpp
     include/ultranet/buffer/buffer.h
     include/ultranet/net/socket.hpp
@@ -108,6 +109,7 @@ install(FILES
         ultranet/coroutine/unified_task.hpp
         ultranet/io/io_engine.hpp
         ultranet/io/io_awaitable.hpp
+        ultranet/io/timer.hpp
         ultranet/io/io_callback.hpp
         ultranet/buffer/buffer.h
         ultranet/net/socket.hpp

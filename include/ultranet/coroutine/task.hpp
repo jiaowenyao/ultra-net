@@ -1,3 +1,5 @@
+#pragma once
+#include <atomic>
 #include <coroutine>
 #include <exception>
 #include <iostream>
@@ -5,7 +7,8 @@
 #include <assert.h>
 #include <format>
 #include "ultranet/utils/noncopyable.h"
-#include "thread_pool.hpp"
+#include "scheduler.h"
+#include "execution_context.hpp"
 
 
 namespace ynet::async {
@@ -51,23 +54,16 @@ struct TaskPromiseBase {
                     std::terminate();
                 }
             }
-            // 这里不主动调用destroy，而是交给Task析构时调用
-            // callee.destroy();
-            // 返回空协程句柄
             return std::noop_coroutine();
         }
 
         constexpr void await_resume() const noexcept {}
-
     };
 
-
-    // 初始化时挂起
     constexpr std::suspend_always initial_suspend() const noexcept {
         return {};
     }
 
-    // 使用自定义的最终等待器
     constexpr TaskFinalAwaiter final_suspend() const noexcept {
         return {};
     }
@@ -76,7 +72,6 @@ struct TaskPromiseBase {
         m_ex = std::move(std::current_exception());
         assert(m_ex != nullptr);
     }
-
 
     std::atomic<std::coroutine_handle<>> m_caller{nullptr};
     std::exception_ptr m_ex{nullptr};
@@ -143,7 +138,6 @@ private:
         AwaitableBase(std::coroutine_handle<promise_type> callee) noexcept
             : m_callee(callee) {}
 
-        // 如果已经完成，就不需要等待了
         bool await_ready() const noexcept {
             return !m_callee || m_callee.done();
         }
@@ -258,4 +252,3 @@ inline Task<void> TaskPromise<void>::get_return_object() noexcept {
 
 
 } // namesapce ynet::async
-

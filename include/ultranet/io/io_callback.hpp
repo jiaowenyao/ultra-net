@@ -9,7 +9,6 @@
 
 namespace ynet::async::io {
 
-// 前向声明
 class IoOperationBase;
 
 // 回调结构 - 存储协程句柄和操作结果
@@ -22,6 +21,7 @@ struct IoCallback {
     // 超时支持
     std::chrono::steady_clock::time_point m_deadline{};
     bool m_has_deadline{false};
+    bool m_timed_out{false};
 
     // 操作开始时间（用于延迟统计）
     std::chrono::steady_clock::time_point m_start_time{};
@@ -34,6 +34,7 @@ struct IoCallback {
         m_operation = nullptr;
         m_deadline = {};
         m_has_deadline = false;
+        m_timed_out = false;
         m_start_time = {};
     }
 
@@ -43,14 +44,23 @@ struct IoCallback {
         return std::chrono::steady_clock::now() >= m_deadline;
     }
 
-    // 设置超时
+    bool is_timeout() const noexcept {
+        return m_timed_out || (m_has_deadline && m_result == -ECANCELED);
+    }
+
+    int effective_result() const noexcept {
+        if (is_timeout()) {
+            return -ETIMEDOUT;
+        }
+        return m_result;
+    }
+
     template <typename Rep, typename Period>
     void set_timeout(std::chrono::duration<Rep, Period> duration) noexcept {
         m_deadline = std::chrono::steady_clock::now() + duration;
         m_has_deadline = true;
     }
 
-    // 获取延迟（微秒）
     int64_t latency_us() const noexcept {
         if (m_start_time == std::chrono::steady_clock::time_point{}) return 0;
         return std::chrono::duration_cast<std::chrono::microseconds>(
@@ -59,7 +69,6 @@ struct IoCallback {
     }
 };
 
-// 操作基类 - 用于公共操作（如取消、重新提交）
 class IoOperationBase {
 public:
     virtual ~IoOperationBase() = default;

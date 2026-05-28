@@ -1,7 +1,8 @@
 #pragma once
 
-#include "src/scheduler.h"
-#include "src/execution_context.hpp"
+#include "scheduler.h"
+#include "execution_context.hpp"
+#include "task.hpp"
 #include "ultranet/io/io_engine.hpp"
 #include "ultranet/io/io_callback.hpp"
 #include "queue.hpp"
@@ -42,12 +43,10 @@ public:
 
     ~WorkStealingThreadPool() override {
         m_stop.store(true, std::memory_order_release);
-
         {
             std::lock_guard<std::mutex> lock(m_global_mutex);
             m_global_cv.notify_all();
         }
-
         for (auto& worker : m_workers) {
             if (worker.joinable()) {
                 worker.join();
@@ -58,7 +57,6 @@ public:
     WorkStealingThreadPool(const WorkStealingThreadPool&) = delete;
     WorkStealingThreadPool& operator=(const WorkStealingThreadPool&) = delete;
 
-    // === Scheduler 接口实现 ===
     void submit(std::coroutine_handle<> handle) override {
         submit_coroutine(handle);
     }
@@ -81,7 +79,6 @@ public:
             std::lock_guard<std::mutex> lock(m_global_mutex);
             total += m_global_queue.size();
         }
-
         for (const auto& queue : m_local_queues) {
             if (!queue->empty()) {
                 ++total;
@@ -108,7 +105,6 @@ public:
     size_t total_completed_ops() const noexcept override {
         return m_stats.completed_ops.load(std::memory_order_relaxed);
     }
-    // === Scheduler 接口实现结束 ===
 
     template <typename Func>
     void submit_function(Func&& func) {
@@ -123,29 +119,47 @@ public:
             m_local_queues[t_thread_local_state.worker_id]->push(std::move(task));
         }
         else {
-            std::lock_guard<std::mutex> lock(m_global_mutex);
-            m_global_queue.push(std::move(task));
+            {
+                std::lock_guard<std::mutex> lock(m_global_mutex);
+                m_global_queue.push(std::move(task));
+            }
             m_global_cv.notify_one();
         }
     }
 
     void submit_coroutine(std::coroutine_handle<> handle) {
-        if (!handle || handle.done()) {
-            return;
-        }
-
+        if (!handle || handle.done()) return;
         increment_tasks();
         UnifiedTask task(handle);
+        enqueue_task(std::move(task));
+    }
 
+    void resubmit_coroutine(std::coroutine_handle<> handle) {
+        if (!handle || handle.done()) return;
+        UnifiedTask task(handle);
+        enqueue_task(std::move(task));
+    }
+
+    void enqueue_task(UnifiedTask task) {
         if (t_thread_local_state.pool == this &&
             t_thread_local_state.worker_id < m_local_queues.size()) {
             m_local_queues[t_thread_local_state.worker_id]->push(std::move(task));
         }
         else {
-            std::lock_guard<std::mutex> lock(m_global_mutex);
-            m_global_queue.push(std::move(task));
+            {
+                std::lock_guard<std::mutex> lock(m_global_mutex);
+                m_global_queue.push(std::move(task));
+            }
             m_global_cv.notify_one();
         }
+    }
+
+    template <typename T>
+    void submit_task(Task<T>& task) {
+        if (task.handle()) {
+            task.handle().promise().m_creator_scheduler = this;
+        }
+        submit_coroutine(task.task());
     }
 
     template<typename F, typename... Args>
@@ -153,17 +167,10 @@ public:
         -> std::future<std::invoke_result_t<F, Args...>> {
 
         using ReturnType = std::invoke_result_t<F, Args...>;
-
-        auto task = std::make_shared<std::packaged_task<ReturnType()>>(
-            std::bind(std::forward<F>(f), std::forward<Args>(args)...)
-        );
-
-        std::future<ReturnType> result = task->get_future();
-
-        submit_function([task]() mutable {
-            (*task)();
-        });
-
+        auto pkg = std::make_shared<std::packaged_task<ReturnType()>>(
+            std::bind(std::forward<F>(f), std::forward<Args>(args)...));
+        std::future<ReturnType> result = pkg->get_future();
+        submit_function([pkg]() mutable { (*pkg)(); });
         return result;
     }
 
@@ -190,21 +197,14 @@ public:
         return t_thread_local_state.pool;
     }
 
-    size_t num_threads() const noexcept {
-        return m_workers.size();
-    }
+    size_t num_threads() const noexcept { return m_workers.size(); }
 
     size_t active_tasks() const noexcept {
         return m_active_tasks.load(std::memory_order_relaxed);
     }
 
-    void record_submit() noexcept {
-        m_stats.submitted_ops.fetch_add(1, std::memory_order_relaxed);
-    }
-
-    void record_completion() noexcept {
-        m_stats.completed_ops.fetch_add(1, std::memory_order_relaxed);
-    }
+    void record_submit() noexcept { m_stats.submitted_ops.fetch_add(1, std::memory_order_relaxed); }
+    void record_completion() noexcept { m_stats.completed_ops.fetch_add(1, std::memory_order_relaxed); }
 
 private:
     struct Stats {
@@ -213,36 +213,30 @@ private:
     };
 
     std::optional<UnifiedTask> try_get_local_task(size_t worker_id) {
-        if (auto task = m_local_queues[worker_id]->pop()) {
-            return task;
+        if (auto t = m_local_queues[worker_id]->pop()) {
+            return t;
         }
         return std::nullopt;
     }
 
     bool try_steal_task(size_t thief_id, std::optional<UnifiedTask>& task) {
-        size_t num_workers = m_workers.size();
-
-        if (num_workers <= 1) {
+        size_t num = m_workers.size();
+        if (num <= 1) {
             return false;
         }
-
         static thread_local std::mt19937 rng(std::random_device{}());
-        std::uniform_int_distribution<size_t> dist(0, num_workers - 1);
+        std::uniform_int_distribution<size_t> dist(0, num - 1);
         size_t start = dist(rng);
-
-        for (size_t i = 0; i < num_workers; ++i) {
-            size_t victim = (start + i) % num_workers;
-
+        for (size_t i = 0; i < num; ++i) {
+            size_t victim = (start + i) % num;
             if (victim == thief_id) {
                 continue;
             }
-
-            if (auto opt_task = m_local_queues[victim]->steal()) {
-                task = std::move(*opt_task);
+            if (auto t = m_local_queues[victim]->steal()) {
+                task = std::move(*t);
                 return true;
             }
         }
-
         return false;
     }
 
@@ -260,33 +254,24 @@ private:
         auto* ctx = io::IoUringEngine::current();
         if (!ctx) return;
 
-        io_uring_cqe* cqe;
-        unsigned head;
-        unsigned processed = 0;
-        io_uring* ring = ctx->get_ring();
-
-        io_uring_for_each_cqe(ring, head, cqe) {
-            ++processed;
+        ctx->for_each_cqe([this](io_uring_cqe* cqe) {
             auto* callback = reinterpret_cast<io::IoCallback*>(io_uring_cqe_get_data(cqe));
-            if (callback) {
-                callback->m_result = cqe->res;
-                callback->m_completed = true;
-
-                // 处理 -EAGAIN / -EINTR：需要重新提交操作
-                if (cqe->res == -EAGAIN || cqe->res == -EINTR) {
-                    // 重新提交操作
-                    if (callback->m_operation) {
-                        auto* op = static_cast<io::IoOperationBase*>(callback->m_operation);
-                        op->resubmit();
-                    }
-                    // 不恢复协程，等待重新完成
-                } else if (callback->m_handle) {
-                    record_completion();
-                    submit_coroutine(callback->m_handle);
-                }
+            if (!callback) {
+                return;
             }
-            io_uring_cqe_seen(ring, cqe);
-        }
+            callback->m_result = cqe->res;
+            callback->m_completed = true;
+
+            if (cqe->res == -EAGAIN || cqe->res == -EINTR) {
+                if (callback->m_operation) {
+                    auto* op = static_cast<io::IoOperationBase*>(callback->m_operation);
+                    op->resubmit();
+                }
+            } else if (callback->m_handle) {
+                record_completion();
+                resubmit_coroutine(callback->m_handle);
+            }
+        });
     }
 
     void worker_thread(size_t worker_id) {
@@ -300,42 +285,28 @@ private:
             process_io_completions();
 
             std::optional<UnifiedTask> task;
+            if ((task = try_get_local_task(worker_id))) { (*task)(); continue; }
+            if (try_steal_task(worker_id, task)) { (*task)(); continue; }
+            if (try_get_from_global(task)) { (*task)(); continue; }
 
-            if ((task = try_get_local_task(worker_id))) {
-                (*task)();
-                continue;
-            }
-
-            if (try_steal_task(worker_id, task)) {
-                (*task)();
-                continue;
-            }
-
-            if (try_get_from_global(task)) {
-                (*task)();
-                continue;
-            }
-
-            wait_for_task();
+            wait_on_io();
         }
 
-        while (auto opt_task = m_local_queues[worker_id]->pop()) {
-            (*opt_task)();
-        }
+        while (auto t = m_local_queues[worker_id]->pop()) { (*t)(); }
 
         t_thread_local_state.pool = nullptr;
         t_thread_local_state.worker_id = static_cast<size_t>(-1);
     }
 
-    void wait_for_task() {
-        std::unique_lock<std::mutex> lock(m_global_mutex);
-        m_global_cv.wait_for(lock, std::chrono::milliseconds(10), [this] {
-            return m_stop.load(std::memory_order_relaxed) ||
-                   !m_global_queue.empty();
-        });
+    void wait_on_io() {
+        auto* ctx = io::IoUringEngine::current();
+        if (!ctx) return;
+        ctx->flush_submit();
+        struct __kernel_timespec ts = {0, 500000000};
+        io_uring_cqe* cqe = nullptr;
+        ctx->wait_cqe(&cqe, 1, &ts);
     }
 
-private:
     std::vector<std::thread> m_workers;
     std::vector<std::unique_ptr<WorkStealingQueue<UnifiedTask>>> m_local_queues;
     std::queue<UnifiedTask> m_global_queue;
