@@ -37,6 +37,8 @@
 #include "ultranet/net/write.hpp"
 #include "ultranet/net/close.hpp"
 #include "ultranet/net/connect.hpp"
+#include "ultranet/net/sendto.hpp"
+#include "ultranet/net/recvfrom.hpp"
 #include "ultranet/net/shutdown.hpp"
 #include "ultranet/net/dns.hpp"
 

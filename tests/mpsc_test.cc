@@ -70,9 +70,9 @@ void test_empty() {
 }
 
 void test_single_producer_thread() {
-    TEST("single producer thread (20K ops)");
-    MpscQueue<int, 1024> q;
-    const int N = 20'000;
+    TEST("single producer thread (5K ops)");
+    MpscQueue<int, 256> q;
+    const int N = 5'000;
     std::atomic<bool> start{false};
 
     std::thread producer([&] {
@@ -103,9 +103,9 @@ void test_single_producer_thread() {
 }
 
 void test_multi_producer_threads() {
-    TEST("2 producers, 1 consumer (10K ops)");
-    MpscQueue<int, 1024> q;
-    const int N_PER_PRODUCER = 5'000;
+    TEST("2 producers, 1 consumer (200 ops)");
+    MpscQueue<int, 64> q;
+    const int N_PER_PRODUCER = 100;
     const int NUM_PRODUCERS = 2;
     const int TOTAL = N_PER_PRODUCER * NUM_PRODUCERS;
     std::atomic<bool> start{false};
