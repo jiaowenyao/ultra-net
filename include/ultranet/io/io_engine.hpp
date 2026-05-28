@@ -24,6 +24,7 @@ struct IoUringEngineConfig {
     uint32_t sq_poll_thread_idle = 0;                 // SQ轮询线程空闲超时
     bool use_fixed_buffers = true;                    // 是否使用注册缓冲区
     size_t batch_threshold = BATCH_SUBMIT_THRESHOLD;  // 批量提交阈值
+    size_t max_pending_ops = 256;                     // 最大待处理操作数（背压阈值）
 };
 
 
@@ -105,6 +106,22 @@ public:
         return m_pending_sqes.load(std::memory_order_relaxed) >= m_config.batch_threshold;
     }
 
+    void increment_pending_ops() noexcept {
+        m_pending_ops.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    void decrement_pending_ops() noexcept {
+        m_pending_ops.fetch_sub(1, std::memory_order_relaxed);
+    }
+
+    bool over_watermark() const noexcept {
+        return m_pending_ops.load(std::memory_order_relaxed) >= m_config.max_pending_ops;
+    }
+
+    size_t pending_op_count() const noexcept {
+        return m_pending_ops.load(std::memory_order_relaxed);
+    }
+
     int wait_cqe(io_uring_cqe** cqe, uint32_t wait_nr = 1,
                  struct __kernel_timespec* ts = nullptr) {
         return io_uring_wait_cqe_timeout(&m_ring, cqe, ts);
@@ -156,6 +173,7 @@ public:
 private:
     explicit IoUringEngine(const Config& config)
         : m_config(config) {
+        m_ring.ring_fd = -1;
         io_uring_params params{};
         params.flags = config.flags;
         if (config.enable_sq_poll) {
@@ -169,6 +187,7 @@ private:
         }
         int ret = io_uring_queue_init_params(config.entries, &m_ring, &params);
         if (ret < 0) {
+            m_ring.ring_fd = -1;
             throw std::system_error(-ret, std::system_category(), "io_uring_queue_init_params failed");
         }
     }
@@ -187,6 +206,7 @@ private:
     io_uring m_ring{};
     std::unordered_map<unsigned, std::unique_ptr<BufferGroup>> m_buffer_groups;
     std::atomic<size_t> m_pending_sqes{0};
+    std::atomic<size_t> m_pending_ops{0};
     static thread_local IoUringEngine* t_current_context;
 };
 

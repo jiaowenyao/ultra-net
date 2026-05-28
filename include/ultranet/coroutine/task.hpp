@@ -50,8 +50,10 @@ struct TaskPromiseBase {
                     std::rethrow_exception(promise.m_ex);
                 }
                 catch (const std::exception& e) {
-                    std::cerr << std::format("catch a exception: {}", e.what());
-                    std::terminate();
+                    std::cerr << std::format("coroutine exception: {}\n", e.what());
+                }
+                catch (...) {
+                    std::cerr << "coroutine exception: unknown\n";
                 }
             }
             return std::noop_coroutine();

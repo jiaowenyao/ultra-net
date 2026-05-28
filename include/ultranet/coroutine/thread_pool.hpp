@@ -12,6 +12,8 @@
 #include <random>
 #include <iostream>
 #include <atomic>
+#include <sys/eventfd.h>
+#include <unistd.h>
 
 
 namespace ynet::async::scheduling {
@@ -24,6 +26,11 @@ public:
 
         if (num_threads == 0) {
             num_threads = 1;
+        }
+
+        m_event_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+        if (m_event_fd < 0) {
+            throw std::system_error(errno, std::system_category(), "eventfd creation failed");
         }
 
         // 创建工作线程的本地队列
@@ -43,14 +50,14 @@ public:
 
     ~WorkStealingThreadPool() override {
         m_stop.store(true, std::memory_order_release);
-        {
-            std::lock_guard<std::mutex> lock(m_global_mutex);
-            m_global_cv.notify_all();
-        }
+        wake_workers(m_workers.size());
         for (auto& worker : m_workers) {
             if (worker.joinable()) {
                 worker.join();
             }
+        }
+        if (m_event_fd >= 0) {
+            ::close(m_event_fd);
         }
     }
 
@@ -123,7 +130,7 @@ public:
                 std::lock_guard<std::mutex> lock(m_global_mutex);
                 m_global_queue.push(std::move(task));
             }
-            m_global_cv.notify_one();
+            wake_workers();
         }
     }
 
@@ -150,7 +157,7 @@ public:
                 std::lock_guard<std::mutex> lock(m_global_mutex);
                 m_global_queue.push(std::move(task));
             }
-            m_global_cv.notify_one();
+            wake_workers();
         }
     }
 
@@ -212,6 +219,16 @@ private:
         std::atomic<size_t> completed_ops{0};
     };
 
+    struct WakeupCallback : io::IoOperationBase {
+        void resubmit() override {}
+        void cancel() override {}
+    };
+
+    void wake_workers(uint64_t count = 1) {
+        uint64_t val = count;
+        ::write(m_event_fd, &val, sizeof(val));
+    }
+
     std::optional<UnifiedTask> try_get_local_task(size_t worker_id) {
         if (auto t = m_local_queues[worker_id]->pop()) {
             return t;
@@ -254,13 +271,21 @@ private:
         auto* ctx = io::IoUringEngine::current();
         if (!ctx) return;
 
-        ctx->for_each_cqe([this](io_uring_cqe* cqe) {
+        ctx->for_each_cqe([this, ctx](io_uring_cqe* cqe) {
             auto* callback = reinterpret_cast<io::IoCallback*>(io_uring_cqe_get_data(cqe));
             if (!callback) {
                 return;
             }
+
             callback->m_result = cqe->res;
             callback->m_completed = true;
+
+            if (callback == &m_wakeup_cb) {
+                uint64_t val;
+                ::read(m_event_fd, &val, sizeof(val));
+                submit_eventfd_read();
+                return;
+            }
 
             if (cqe->res == -EAGAIN || cqe->res == -EINTR) {
                 if (callback->m_operation) {
@@ -268,10 +293,23 @@ private:
                     op->resubmit();
                 }
             } else if (callback->m_handle) {
+                ctx->decrement_pending_ops();
                 record_completion();
                 resubmit_coroutine(callback->m_handle);
             }
         });
+    }
+
+    void submit_eventfd_read() {
+        auto* ctx = io::IoUringEngine::current();
+        if (!ctx) return;
+        auto* sqe = ctx->get_sqe();
+        if (sqe) {
+            io_uring_prep_read(sqe, m_event_fd, &m_eventfd_buf, sizeof(m_eventfd_buf), 0);
+            io_uring_sqe_set_data(sqe, &m_wakeup_cb);
+            ctx->increment_pending();
+            ctx->submit_now();
+        }
     }
 
     void worker_thread(size_t worker_id) {
@@ -280,6 +318,8 @@ private:
 
         ExecutionContext::Scope context_scope(this);
         io::IoUringEngine::Scope io_uring_scope{};
+
+        submit_eventfd_read();
 
         while (!m_stop.load(std::memory_order_acquire)) {
             process_io_completions();
@@ -302,7 +342,7 @@ private:
         auto* ctx = io::IoUringEngine::current();
         if (!ctx) return;
         ctx->flush_submit();
-        struct __kernel_timespec ts = {0, 500000000};
+        struct __kernel_timespec ts = {5, 0};
         io_uring_cqe* cqe = nullptr;
         ctx->wait_cqe(&cqe, 1, &ts);
     }
@@ -311,12 +351,14 @@ private:
     std::vector<std::unique_ptr<WorkStealingQueue<UnifiedTask>>> m_local_queues;
     std::queue<UnifiedTask> m_global_queue;
     mutable std::mutex m_global_mutex;
-    std::condition_variable m_global_cv;
     std::atomic<bool> m_stop;
     std::mutex m_completion_mutex;
     std::condition_variable m_completion_cv;
     std::atomic<size_t> m_active_tasks;
     Stats m_stats{};
+    int m_event_fd{-1};
+    uint64_t m_eventfd_buf{0};
+    io::IoCallback m_wakeup_cb{};
 
     struct ThreadLocalState {
         WorkStealingThreadPool* pool = nullptr;

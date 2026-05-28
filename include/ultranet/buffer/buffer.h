@@ -36,6 +36,7 @@ private:
     unsigned m_gid;
     size_t m_entries;
     size_t m_buf_size;
+    bool m_registered{false};
 
     std::unique_ptr<char[]> m_buffers;
     std::unique_ptr<io_uring_buf[]> m_bufs;

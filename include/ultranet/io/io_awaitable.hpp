@@ -61,6 +61,11 @@ public:
 
         auto* ctx = IoUringEngine::current();
 
+        if (ctx->over_watermark()) {
+            m_callback.m_handle.resume();
+            return;
+        }
+
         m_sqe = ctx->get_sqe();
         if (m_sqe) [[likely]] {
             m_setup_fn(m_sqe);
@@ -80,6 +85,7 @@ public:
             }
 
             ctx->increment_pending();
+            ctx->increment_pending_ops();
 
             if (ctx->should_submit()) {
                 ctx->submit();
@@ -109,27 +115,30 @@ public:
 
         auto* ctx = IoUringEngine::current();
 
-        if (m_callback.m_has_deadline && !m_has_timeout_sqe) {
+        auto* new_sqe = ctx->get_sqe();
+        if (!new_sqe) return;
+
+        *new_sqe = *m_sqe;
+        io_uring_sqe_set_data(new_sqe, &m_callback);
+        m_sqe = new_sqe;
+
+        if (m_callback.m_has_deadline) {
+            m_sqe->flags |= IOSQE_IO_LINK;
+
             auto* timeout_sqe = ctx->get_sqe();
             if (timeout_sqe) {
                 struct __kernel_timespec ts = make_rel_timespec(m_callback.m_deadline);
-                io_uring_prep_timeout(timeout_sqe, &ts, 0, 0);
-                timeout_sqe->flags |= IOSQE_IO_LINK;
+                io_uring_prep_link_timeout(timeout_sqe, &ts, 0);
                 io_uring_sqe_set_data(timeout_sqe, nullptr);
                 ctx->increment_pending();
-                m_has_timeout_sqe = true;
             }
         }
 
-        auto* new_sqe = ctx->get_sqe();
-        if (new_sqe) {
-            *new_sqe = *m_sqe;
-            io_uring_sqe_set_data(new_sqe, &m_callback);
-            m_sqe = new_sqe;
-            ctx->increment_pending();
-            if (ctx->should_submit()) {
-                ctx->submit();
-            }
+        ctx->increment_pending();
+        if (ctx->should_submit()) {
+            ctx->submit();
+        } else if (m_callback.m_has_deadline) {
+            ctx->submit_now();
         }
     }
 

@@ -47,14 +47,17 @@ BufferGroup::BufferGroup(unsigned gid, size_t entries, size_t buf_size)
     auto* ring = IoUringEngine::current()->get_ring();
     int ret = io_uring_register_buf_ring(ring, &m_reg, 0);
     if (ret < 0) {
-        throw std::system_error(-ret, std::system_category(), 
+        throw std::system_error(-ret, std::system_category(),
             "failed to register buffer ring");
     }
+    m_registered = true;
 }
 
 BufferGroup::~BufferGroup() {
-    auto* ring = IoUringEngine::current()->get_ring();
-    io_uring_unregister_buf_ring(ring, m_gid);
+    if (m_registered) {
+        auto* ring = IoUringEngine::current()->get_ring();
+        io_uring_unregister_buf_ring(ring, m_gid);
+    }
 }
 
 
