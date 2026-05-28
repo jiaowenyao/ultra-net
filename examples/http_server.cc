@@ -93,10 +93,13 @@ Task<void> http_server(int port, scheduling::WorkStealingThreadPool& pool) {
 
     while (g_running) {
         Accept acceptor(listen_fd);
+        acceptor.with_timeout(std::chrono::milliseconds(500));
         auto client = co_await acceptor;
         if (!client) {
-            if (client.error().value() == ECANCELED) break;
-            if (client.error().value() != EAGAIN) {
+            int ev = client.error().value();
+            if (ev == ETIMEDOUT) continue;
+            if (ev == ECANCELED) break;
+            if (ev != EAGAIN) {
                 std::cerr << "accept error: " << client.error().message() << std::endl;
             }
             continue;

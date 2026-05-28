@@ -23,9 +23,12 @@ Task<void> echo_session(int fd, scheduling::WorkStealingThreadPool& pool) {
 
     while (g_running) {
         Read reader(fd, buf, sizeof(buf));
+        reader.with_timeout(std::chrono::milliseconds(500));
         auto data = co_await reader;
         if (!data) {
-            if (data.error().value() != EAGAIN) {
+            int ev = data.error().value();
+            if (ev == ETIMEDOUT) continue;
+            if (ev != EAGAIN) {
                 std::cerr << "read error: " << data.error().message() << std::endl;
             }
             break;
@@ -86,10 +89,13 @@ Task<void> echo_server(int port, scheduling::WorkStealingThreadPool& pool) {
 
     while (g_running) {
         Accept acceptor(listen_fd);
+        acceptor.with_timeout(std::chrono::milliseconds(500));
         auto client = co_await acceptor;
         if (!client) {
-            if (client.error().value() == ECANCELED) break;
-            if (client.error().value() != EAGAIN) {
+            int ev = client.error().value();
+            if (ev == ETIMEDOUT) continue;
+            if (ev == ECANCELED) break;
+            if (ev != EAGAIN) {
                 std::cerr << "accept error: " << client.error().message() << std::endl;
             }
             continue;
