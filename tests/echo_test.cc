@@ -90,8 +90,9 @@ Task<void> echo_server(int port, scheduling::WorkStealingThreadPool& pool) {
     addr.sin_port = htons(port);
     addr.sin_addr.s_addr = INADDR_ANY;
 
-    if (bind(listen_fd, (sockaddr*)&addr, sizeof(addr)) < 0) {
-        std::cerr << "bind failed: " << strerror(errno) << std::endl;
+    auto b = co_await Bind(listen_fd, (sockaddr*)&addr, sizeof(addr));
+    if (!b) {
+        std::cerr << "bind failed: " << b.error().message() << std::endl;
         co_return;
     }
 

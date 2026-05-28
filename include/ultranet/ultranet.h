@@ -30,12 +30,14 @@
 #include "ultranet/io/timer.hpp"
 #include "ultranet/buffer/buffer.h"
 #include "ultranet/net/socket.hpp"
+#include "ultranet/net/bind.hpp"
 #include "ultranet/net/listen.hpp"
 #include "ultranet/net/accept.hpp"
 #include "ultranet/net/read.hpp"
 #include "ultranet/net/write.hpp"
 #include "ultranet/net/close.hpp"
 #include "ultranet/net/connect.hpp"
+#include "ultranet/net/shutdown.hpp"
 
 // Version information
 #define ULTRANET_VERSION_MAJOR 0
