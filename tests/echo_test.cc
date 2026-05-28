@@ -16,11 +16,11 @@
 #include <iostream>
 #include <cassert>
 #include <chrono>
+#include <thread>
 
 using namespace ynet::async;
 using namespace ynet::async::io;
 
-// 测试统计
 struct TestStats {
     std::atomic<int> server_started{0};
     std::atomic<int> client_connected{0};
@@ -31,34 +31,32 @@ struct TestStats {
 
 TestStats g_stats;
 
-// Echo 会话
 Task<void> echo_session(int fd) {
-    Read reader(fd, 1);
+    char buf[4096];
 
     while (true) {
+        Read reader(fd, buf, sizeof(buf));
         auto data = co_await reader;
         if (!data) {
-            if (data.error() == std::errc::operation_canceled) {
-                std::cout << "Session: read canceled" << std::endl;
-            } else {
-                std::cout << "Session: read error: " << data.error().message() << std::endl;
-                g_stats.errors++;
+            if (data.error().value() == EAGAIN || data.error().value() == ECANCELED) {
+                break;
             }
+            std::cerr << "Session: read error: " << data.error().message() << std::endl;
+            g_stats.errors++;
             break;
         }
 
-        if (data->size() == 0) {
+        if (*data == 0) {
             std::cout << "Session: connection closed" << std::endl;
             break;
         }
 
-        g_stats.bytes_received += data->size();
+        g_stats.bytes_received += *data;
 
-        // Echo back
-        Write writer(fd, data->data(), data->size());
+        Write writer(fd, buf, *data);
         auto wrote = co_await writer;
         if (!wrote) {
-            std::cout << "Session: write error: " << wrote.error().message() << std::endl;
+            std::cerr << "Session: write error: " << wrote.error().message() << std::endl;
             g_stats.errors++;
             break;
         }
@@ -70,7 +68,6 @@ Task<void> echo_session(int fd) {
     std::cout << "Session closed" << std::endl;
 }
 
-// Echo 服务器
 Task<void> echo_server(int port, scheduling::WorkStealingThreadPool& pool) {
     auto ctx = IoUringEngine::current();
     if (!ctx) {
@@ -78,9 +75,7 @@ Task<void> echo_server(int port, scheduling::WorkStealingThreadPool& pool) {
         co_return;
     }
 
-    auto& bg = ctx->register_buffer_group(1, 256, 4096);
-
-    auto sock = co_await Socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
+    auto sock = co_await Socket(AF_INET, SOCK_STREAM, 0);
     if (!sock) {
         std::cerr << "socket failed: " << sock.error().message() << std::endl;
         co_return;
@@ -109,15 +104,14 @@ Task<void> echo_server(int port, scheduling::WorkStealingThreadPool& pool) {
     std::cout << "Echo server listening on port " << port << std::endl;
     g_stats.server_started = 1;
 
-    Accept acceptor(listen_fd);
-
     while (true) {
+        Accept acceptor(listen_fd);
         auto client = co_await acceptor;
         if (!client) {
-            if (client.error() == std::errc::operation_canceled) {
+            if (client.error().value() == ECANCELED) {
                 break;
             }
-            std::cout << "accept error: " << client.error().message() << std::endl;
+            std::cerr << "accept error: " << client.error().message() << std::endl;
             g_stats.errors++;
             continue;
         }
@@ -125,7 +119,6 @@ Task<void> echo_server(int port, scheduling::WorkStealingThreadPool& pool) {
         std::cout << "Accepted client: " << *client << std::endl;
         g_stats.client_connected++;
 
-        // 启动会话处理
         auto session = echo_session(*client);
         pool.submit(session.task());
     }
@@ -133,15 +126,11 @@ Task<void> echo_server(int port, scheduling::WorkStealingThreadPool& pool) {
     co_await Close(listen_fd);
 }
 
-// 简单的 TCP 客户端
 Task<void> tcp_client(int port) {
     auto ctx = IoUringEngine::current();
     if (!ctx) co_return;
 
-    ctx->register_buffer_group(2, 64, 4096);
-
-    // 创建 socket
-    auto sock = co_await Socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
+    auto sock = co_await Socket(AF_INET, SOCK_STREAM, 0);
     if (!sock) {
         std::cerr << "client socket failed" << std::endl;
         co_return;
@@ -149,7 +138,6 @@ Task<void> tcp_client(int port) {
 
     int fd = *sock;
 
-    // 连接服务器
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
     addr.sin_port = htons(port);
@@ -164,7 +152,6 @@ Task<void> tcp_client(int port) {
 
     std::cout << "Client connected to server" << std::endl;
 
-    // 发送测试数据
     const char* test_msg = "Hello, Echo Server!";
     size_t msg_len = strlen(test_msg);
 
@@ -177,21 +164,19 @@ Task<void> tcp_client(int port) {
 
     std::cout << "Sent " << *wrote << " bytes" << std::endl;
 
-    // 读取响应
-    Read reader(fd, 2);
+    char buf[4096];
+    Read reader(fd, buf, sizeof(buf));
     auto response = co_await reader;
     if (!response) {
         std::cerr << "read failed: " << response.error().message() << std::endl;
         co_return;
     }
 
-    std::cout << "Received " << response->size() << " bytes: ";
-    std::cout.write(response->data(), response->size());
+    std::cout << "Received " << *response << " bytes: ";
+    std::cout.write(buf, *response);
     std::cout << std::endl;
 
-    // 验证数据
-    if (response->size() == msg_len &&
-        memcmp(response->data(), test_msg, msg_len) == 0) {
+    if (*response == msg_len && memcmp(buf, test_msg, msg_len) == 0) {
         std::cout << "Echo test PASSED!" << std::endl;
     } else {
         std::cout << "Echo test FAILED!" << std::endl;
@@ -201,7 +186,6 @@ Task<void> tcp_client(int port) {
     co_await Close(fd);
 }
 
-// 测试入口
 int main() {
     std::cout << "=== Echo Server/Client Test ===" << std::endl;
 
@@ -209,14 +193,11 @@ int main() {
         scheduling::WorkStealingThreadPool pool(2);
         ExecutionContext::Scope scope(&pool);
 
-        // 启动服务器
         auto server_task = echo_server(18080, pool);
         pool.submit(server_task.task());
 
-        // 等待服务器启动
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
-        // 启动客户端
         auto client_task = tcp_client(18080);
         pool.submit(client_task.task());
 

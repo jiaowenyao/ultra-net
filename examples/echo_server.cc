@@ -1,17 +1,15 @@
-// examples/echo_server.cc - Simple echo server using ultranet
+// examples/echo_server.cc - Echo server using ultranet coroutines + io_uring
+#include "ultranet/ultranet.h"
 #include <iostream>
-#include <chrono>
-#include <thread>
-#include <csignal>
+#include <atomic>
 #include <cstring>
+#include <csignal>
 #include <errno.h>
-#include <fcntl.h>
 #include <netinet/in.h>
-#include <arpa/inet.h>
 #include <sys/socket.h>
 #include <unistd.h>
-#include "ultranet/io/io_engine.hpp"
 
+using namespace ynet::async;
 using namespace ynet::async::io;
 
 std::atomic<bool> g_running{true};
@@ -20,22 +18,48 @@ void signal_handler(int) {
     g_running = false;
 }
 
-int main(int argc, char* argv[]) {
-    int port = (argc > 1) ? std::atoi(argv[1]) : 8080;
+Task<void> echo_session(int fd, scheduling::WorkStealingThreadPool& pool) {
+    char buf[4096];
 
-    std::signal(SIGINT, signal_handler);
-    std::signal(SIGTERM, signal_handler);
+    while (g_running) {
+        Read reader(fd, buf, sizeof(buf));
+        auto data = co_await reader;
+        if (!data) {
+            if (data.error().value() != EAGAIN) {
+                std::cerr << "read error: " << data.error().message() << std::endl;
+            }
+            break;
+        }
 
-    // Init io_uring context
-    IoUringEngine::Scope scope;
+        size_t n = *data;
+        if (n == 0) {
+            break;
+        }
 
-    std::cout << "Creating server socket..." << std::endl;
-
-    int listen_fd = ::socket(AF_INET, SOCK_STREAM, 0);
-    if (listen_fd < 0) {
-        std::cerr << "socket failed: " << strerror(errno) << std::endl;
-        return 1;
+        size_t written = 0;
+        while (written < n) {
+            Write writer(fd, buf + written, n - written);
+            auto result = co_await writer;
+            if (!result) {
+                std::cerr << "write error: " << result.error().message() << std::endl;
+                co_await Close(fd);
+                co_return;
+            }
+            written += *result;
+        }
     }
+
+    co_await Close(fd);
+}
+
+Task<void> echo_server(int port, scheduling::WorkStealingThreadPool& pool) {
+    auto sock = co_await Socket(AF_INET, SOCK_STREAM, 0);
+    if (!sock) {
+        std::cerr << "socket failed: " << sock.error().message() << std::endl;
+        co_return;
+    }
+
+    int listen_fd = *sock;
 
     int opt = 1;
     setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
@@ -47,56 +71,59 @@ int main(int argc, char* argv[]) {
 
     if (bind(listen_fd, (sockaddr*)&addr, sizeof(addr)) < 0) {
         std::cerr << "bind failed: " << strerror(errno) << std::endl;
-        return 1;
+        co_await Close(listen_fd);
+        co_return;
     }
 
-    if (::listen(listen_fd, 128) < 0) {
-        std::cerr << "listen failed: " << strerror(errno) << std::endl;
-        return 1;
+    auto l = co_await Listen(listen_fd, 128);
+    if (!l) {
+        std::cerr << "listen failed: " << l.error().message() << std::endl;
+        co_await Close(listen_fd);
+        co_return;
     }
-
-    int flags = fcntl(listen_fd, F_GETFL, 0);
-    fcntl(listen_fd, F_SETFL, flags | O_NONBLOCK);
 
     std::cout << "Echo server listening on port " << port << std::endl;
 
-    // Register buffer group for zero-copy I/O
-    auto& bg = IoUringEngine::current()->register_buffer_group(1, 1024, 4096);
-    (void)bg;
-
-    // Simple accept loop
     while (g_running) {
-        sockaddr_in client_addr{};
-        socklen_t client_len = sizeof(client_addr);
-
-        int client_fd = ::accept4(listen_fd, (sockaddr*)&client_addr, &client_len, SOCK_NONBLOCK);
-        if (client_fd < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(10));
-                continue;
+        Accept acceptor(listen_fd);
+        auto client = co_await acceptor;
+        if (!client) {
+            if (client.error().value() == ECANCELED) break;
+            if (client.error().value() != EAGAIN) {
+                std::cerr << "accept error: " << client.error().message() << std::endl;
             }
-            break;
+            continue;
         }
 
-        std::cout << "Accepted connection: " << client_fd << std::endl;
+        int client_fd = *client;
+        std::cout << "Accepted connection: fd=" << client_fd << std::endl;
 
-        // Simple echo - read and write back
-        char buf[4096];
-        ssize_t n = ::read(client_fd, buf, sizeof(buf));
-        if (n > 0) {
-            // Echo back
-            ssize_t written = 0;
-            while (written < n) {
-                ssize_t w = ::write(client_fd, buf + written, n - written);
-                if (w > 0) written += w;
-            }
-            std::cout << "Echoed " << n << " bytes to client " << client_fd << std::endl;
-        }
-
-        ::close(client_fd);
+        pool.submit(echo_session(client_fd, pool).task());
     }
 
-    ::close(listen_fd);
+    co_await Close(listen_fd);
     std::cout << "Server stopped" << std::endl;
+}
+
+int main(int argc, char* argv[]) {
+    int port = (argc > 1) ? std::atoi(argv[1]) : 8080;
+
+    std::signal(SIGINT, signal_handler);
+    std::signal(SIGTERM, signal_handler);
+    std::signal(SIGPIPE, SIG_IGN);
+
+    try {
+        scheduling::WorkStealingThreadPool pool(2);
+        ExecutionContext::Scope scope(&pool);
+
+        auto server_task = echo_server(port, pool);
+        pool.submit(server_task.task());
+
+        pool.wait_all();
+    } catch (const std::exception& e) {
+        std::cerr << "Fatal error: " << e.what() << std::endl;
+        return 1;
+    }
+
     return 0;
 }
