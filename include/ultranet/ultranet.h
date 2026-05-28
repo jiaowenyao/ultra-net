@@ -38,6 +38,7 @@
 #include "ultranet/net/close.hpp"
 #include "ultranet/net/connect.hpp"
 #include "ultranet/net/shutdown.hpp"
+#include "ultranet/net/dns.hpp"
 
 // Version information
 #define ULTRANET_VERSION_MAJOR 0

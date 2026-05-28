@@ -6,9 +6,9 @@
 #include "ultranet/io/io_engine.hpp"
 #include "ultranet/io/io_callback.hpp"
 #include "queue.hpp"
+#include "mpsc_queue.hpp"
 #include <thread>
 #include <future>
-#include <queue>
 #include <random>
 #include <iostream>
 #include <atomic>
@@ -38,6 +38,14 @@ public:
         for (size_t i = 0; i < num_threads; ++i) {
             m_local_queues.emplace_back(
                 std::make_unique<WorkStealingQueue<UnifiedTask>>()
+            );
+        }
+
+        // 创建跨线程MPSC队列（取代全局锁队列）
+        m_mpsc_queues.reserve(num_threads);
+        for (size_t i = 0; i < num_threads; ++i) {
+            m_mpsc_queues.emplace_back(
+                std::make_unique<MpscQueue<UnifiedTask>>()
             );
         }
 
@@ -82,14 +90,11 @@ public:
 
     size_t pending_tasks() const noexcept override {
         size_t total = 0;
-        {
-            std::lock_guard<std::mutex> lock(m_global_mutex);
-            total += m_global_queue.size();
+        for (const auto& q : m_mpsc_queues) {
+            total += q->approximate_size();
         }
         for (const auto& queue : m_local_queues) {
-            if (!queue->empty()) {
-                ++total;
-            }
+            total += queue->size();
         }
         return total;
     }
@@ -126,11 +131,7 @@ public:
             m_local_queues[t_thread_local_state.worker_id]->push(std::move(task));
         }
         else {
-            {
-                std::lock_guard<std::mutex> lock(m_global_mutex);
-                m_global_queue.push(std::move(task));
-            }
-            wake_workers();
+            enqueue_external(std::move(task));
         }
     }
 
@@ -153,12 +154,16 @@ public:
             m_local_queues[t_thread_local_state.worker_id]->push(std::move(task));
         }
         else {
-            {
-                std::lock_guard<std::mutex> lock(m_global_mutex);
-                m_global_queue.push(std::move(task));
-            }
-            wake_workers();
+            enqueue_external(std::move(task));
         }
+    }
+
+    void enqueue_external(UnifiedTask task) {
+        size_t idx = m_next_worker.fetch_add(1, std::memory_order_relaxed) % m_workers.size();
+        while (!m_mpsc_queues[idx]->try_push(std::move(task))) {
+            idx = m_next_worker.fetch_add(1, std::memory_order_relaxed) % m_workers.size();
+        }
+        wake_workers();
     }
 
     template <typename T>
@@ -257,11 +262,9 @@ private:
         return false;
     }
 
-    bool try_get_from_global(std::optional<UnifiedTask>& task) {
-        std::lock_guard<std::mutex> lock(m_global_mutex);
-        if (!m_global_queue.empty()) {
-            task = std::move(m_global_queue.front());
-            m_global_queue.pop();
+    bool try_get_from_mpsc(size_t worker_id, std::optional<UnifiedTask>& task) {
+        if (auto t = m_mpsc_queues[worker_id]->try_pop()) {
+            task = std::move(*t);
             return true;
         }
         return false;
@@ -327,12 +330,13 @@ private:
             std::optional<UnifiedTask> task;
             if ((task = try_get_local_task(worker_id))) { (*task)(); continue; }
             if (try_steal_task(worker_id, task)) { (*task)(); continue; }
-            if (try_get_from_global(task)) { (*task)(); continue; }
+            if (try_get_from_mpsc(worker_id, task)) { (*task)(); continue; }
 
             wait_on_io();
         }
 
         while (auto t = m_local_queues[worker_id]->pop()) { (*t)(); }
+        while (auto t = m_mpsc_queues[worker_id]->try_pop()) { (*t)(); }
 
         t_thread_local_state.pool = nullptr;
         t_thread_local_state.worker_id = static_cast<size_t>(-1);
@@ -349,8 +353,8 @@ private:
 
     std::vector<std::thread> m_workers;
     std::vector<std::unique_ptr<WorkStealingQueue<UnifiedTask>>> m_local_queues;
-    std::queue<UnifiedTask> m_global_queue;
-    mutable std::mutex m_global_mutex;
+    std::vector<std::unique_ptr<MpscQueue<UnifiedTask>>> m_mpsc_queues;
+    std::atomic<size_t> m_next_worker{0};
     std::atomic<bool> m_stop;
     std::mutex m_completion_mutex;
     std::condition_variable m_completion_cv;

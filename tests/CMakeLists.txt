@@ -26,6 +26,8 @@ set(TEST_SOURCES
     init.cc
     pool_test.cc
     error_test.cc
+    mpsc_test.cc
+    dns_test.cc
 )
 
 foreach(test_src ${TEST_SOURCES})
