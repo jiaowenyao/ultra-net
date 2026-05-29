@@ -16,20 +16,6 @@ public:
         return current() != nullptr;
     }
 
-    // 工具函数，在当前调度器上执行
-    template <typename Func>
-    static void execute_on_current(Func&& func) {
-        if (auto* scheduler = current()) {
-            scheduler->submit([func = std::forward<Func>(func)]() mutable {
-                func();
-            });
-        }
-        else {
-            // 没有调度器就直接执行
-            func();
-        }
-    }
-
 public:
     // 作用域守卫
     class Scope {

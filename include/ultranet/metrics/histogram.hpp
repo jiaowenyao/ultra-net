@@ -21,7 +21,6 @@ public:
     }
 
     void observe(double value) noexcept {
-        m_count.fetch_add(1, std::memory_order_relaxed);
         double old = m_sum.load(std::memory_order_relaxed);
         while (!m_sum.compare_exchange_weak(old, old + value,
                 std::memory_order_relaxed, std::memory_order_relaxed)) {}
@@ -32,6 +31,7 @@ public:
         }
 
         lock();
+        m_count.fetch_add(1, std::memory_order_relaxed);
         m_counts[idx]++;
         unlock();
     }
@@ -82,12 +82,12 @@ private:
     }
 
     double percentile(double p) {
-        auto total = count();
-        if (total == 0) return 0;
-
         lock();
+        auto total = static_cast<double>(m_count.load(std::memory_order_relaxed));
         auto counts = m_counts;
         unlock();
+
+        if (total == 0) return 0;
 
         double target = p * static_cast<double>(total);
         int64_t cumulative = 0;

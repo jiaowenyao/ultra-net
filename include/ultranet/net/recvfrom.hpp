@@ -39,22 +39,6 @@ public:
         return static_cast<size_t>(m_callback.m_result);
     }
 
-    void resubmit() override {
-        if (m_callback.m_has_deadline && m_callback.is_expired()) {
-            m_callback.m_result = -ETIMEDOUT;
-            m_callback.m_completed = true;
-            return;
-        }
-        auto* ctx = IoUringEngine::current();
-        auto* new_sqe = ctx->get_sqe();
-        if (new_sqe) {
-            *new_sqe = *m_sqe;
-            io_uring_sqe_set_data(new_sqe, &m_callback);
-            m_sqe = new_sqe;
-            ctx->increment_pending();
-        }
-    }
-
     const sockaddr_storage& source_addr() const noexcept { return m_src_addr; }
     socklen_t source_addr_len() const noexcept { return m_msg.msg_namelen; }
     int flags() const noexcept { return m_flags; }

@@ -1,6 +1,7 @@
 #include "ultranet/ultranet.h"
 #include <iostream>
 #include <thread>
+#include <mutex>
 #include <set>
 
 using namespace ynet::trace;
@@ -51,6 +52,7 @@ void test_span_unique_ids() {
     T("span unique IDs across threads");
     const int N = 100;
     std::vector<Span> spans;
+    std::mutex spans_mutex;
     std::vector<std::thread> threads;
 
     for (int t = 0; t < 4; ++t) {
@@ -58,6 +60,7 @@ void test_span_unique_ids() {
             for (int i = 0; i < N; ++i) {
                 Span s("op-" + std::to_string(t) + "-" + std::to_string(i));
                 s.stop();
+                std::lock_guard<std::mutex> lock(spans_mutex);
                 spans.push_back(std::move(s));
             }
         });

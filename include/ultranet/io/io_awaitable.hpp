@@ -2,6 +2,7 @@
 
 #include "io_engine.hpp"
 #include "io_callback.hpp"
+#include "execution_context.hpp"
 #include <expected>
 #include <system_error>
 #include <functional>
@@ -110,16 +111,35 @@ public:
 
     void resubmit() override {
         if (!m_is_parent) return;
+
         if (m_callback.m_has_deadline && m_callback.is_expired()) {
             m_callback.m_result = -ETIMEDOUT;
             m_callback.m_completed = true;
+            if (auto* engine = IoUringEngine::current()) {
+                engine->decrement_pending_ops();
+            }
+            if (m_callback.m_handle) {
+                auto* sched = ExecutionContext::current();
+                if (sched) sched->resubmit(m_callback.m_handle);
+            }
             return;
         }
 
         auto* ctx = IoUringEngine::current();
 
         auto* new_sqe = ctx->get_sqe();
-        if (!new_sqe) return;
+        if (!new_sqe) {
+            m_callback.m_result = -ENOBUFS;
+            m_callback.m_completed = true;
+            if (auto* engine = IoUringEngine::current()) {
+                engine->decrement_pending_ops();
+            }
+            if (m_callback.m_handle) {
+                auto* sched = ExecutionContext::current();
+                if (sched) sched->resubmit(m_callback.m_handle);
+            }
+            return;
+        }
 
         *new_sqe = *m_sqe;
         io_uring_sqe_set_data(new_sqe, &m_callback);
