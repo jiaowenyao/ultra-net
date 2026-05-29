@@ -14,4 +14,8 @@ target_link_libraries(echo_client ultranet pthread)
 add_executable(http_server http_server.cc)
 target_link_libraries(http_server ultranet pthread)
 
+# Stress test
+add_executable(stress_test stress_test.cc)
+target_link_libraries(stress_test ultranet pthread)
+
 message(STATUS "Examples configured")
