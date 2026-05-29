@@ -22,6 +22,7 @@
 
 #include "ultranet/coroutine/task.hpp"
 #include "ultranet/coroutine/thread_pool.hpp"
+#include "ultranet/coroutine/channel.hpp"
 #include "scheduler.h"
 #include "execution_context.hpp"
 #include "ultranet/io/io_engine.hpp"

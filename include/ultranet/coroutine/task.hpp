@@ -18,6 +18,15 @@ struct TaskPromiseBase {
         m_creator_scheduler = ExecutionContext::current();
     }
 
+    // 强制堆分配，阻止编译器 HALO 优化将协程帧放在栈上
+    // 协程被提交到线程池后生命周期脱离调用栈，栈上分配会导致 use-after-free
+    static void* operator new(std::size_t size) {
+        return ::operator new(size);
+    }
+    static void operator delete(void* ptr, std::size_t size) {
+        ::operator delete(ptr);
+    }
+
     // 最终的等待器
     struct TaskFinalAwaiter {
         // 总是挂起进入清理流程

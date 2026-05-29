@@ -29,6 +29,7 @@ set(TEST_SOURCES
     mpsc_test.cc
     dns_test.cc
     udp_test.cc
+    channel_test.cc
 )
 
 foreach(test_src ${TEST_SOURCES})

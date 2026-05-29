@@ -76,6 +76,10 @@ public:
         submit_coroutine(handle);
     }
 
+    void resubmit(std::coroutine_handle<> handle) override {
+        resubmit_coroutine(handle);
+    }
+
     bool is_current_thread() const override {
         return t_thread_local_state.pool == this;
     }

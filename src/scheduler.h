@@ -13,6 +13,9 @@ public:
 
     virtual void submit(std::coroutine_handle<> handle) = 0;
 
+    // 将已挂起的协程重新加入调度队列（不增加任务计数）
+    virtual void resubmit(std::coroutine_handle<> handle) = 0;
+
     // 检查当前线程是否属于此调度器
     virtual bool is_current_thread() const = 0;
 
