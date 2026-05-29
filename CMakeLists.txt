@@ -39,6 +39,15 @@ if(NOT liburing_FOUND)
     message(FATAL_ERROR "liburing not found. Please install liburing-dev")
 endif()
 
+# Find spdlog
+find_package(spdlog QUIET)
+if(spdlog_FOUND)
+    message(STATUS "spdlog found")
+else()
+    message(STATUS "spdlog not found via cmake, trying pkg-config")
+    pkg_check_modules(spdlog QUIET spdlog)
+endif()
+
 # Create ultranet library
 set(ULTRANET_SOURCES
     src/buffer/buffer.cc
@@ -52,18 +61,32 @@ set(ULTRANET_PUBLIC_HEADERS
     include/ultranet/coroutine/thread_pool.hpp
     include/ultranet/coroutine/queue.hpp
     include/ultranet/coroutine/unified_task.hpp
+    include/ultranet/coroutine/mpsc_queue.hpp
+    include/ultranet/coroutine/channel.hpp
     include/ultranet/io/io_engine.hpp
     include/ultranet/io/io_awaitable.hpp
     include/ultranet/io/timer.hpp
     include/ultranet/io/io_callback.hpp
+    include/ultranet/io/reactor.hpp
     include/ultranet/buffer/buffer.h
     include/ultranet/net/socket.hpp
+    include/ultranet/net/bind.hpp
     include/ultranet/net/listen.hpp
     include/ultranet/net/accept.hpp
     include/ultranet/net/read.hpp
     include/ultranet/net/write.hpp
-    include/ultranet/net/connect.hpp
     include/ultranet/net/close.hpp
+    include/ultranet/net/connect.hpp
+    include/ultranet/net/sendto.hpp
+    include/ultranet/net/recvfrom.hpp
+    include/ultranet/net/shutdown.hpp
+    include/ultranet/net/dns.hpp
+    include/ultranet/metrics/counter.hpp
+    include/ultranet/metrics/gauge.hpp
+    include/ultranet/metrics/histogram.hpp
+    include/ultranet/metrics/registry.hpp
+    include/ultranet/log/logger.hpp
+    include/ultranet/trace/span.hpp
 )
 
 add_library(ultranet ${ULTRANET_SOURCES} ${ULTRANET_PUBLIC_HEADERS})
@@ -81,6 +104,11 @@ target_link_libraries(ultranet
     PUBLIC
         ${liburing_LIBRARIES}
 )
+
+if(spdlog_FOUND)
+    target_link_libraries(ultranet PUBLIC spdlog::spdlog)
+    target_compile_definitions(ultranet PUBLIC ULTRANET_HAS_SPDLOG=1)
+endif()
 
 target_compile_definitions(ultranet
     PUBLIC
@@ -107,18 +135,32 @@ install(FILES
         ultranet/coroutine/thread_pool.hpp
         ultranet/coroutine/queue.hpp
         ultranet/coroutine/unified_task.hpp
+        ultranet/coroutine/mpsc_queue.hpp
+        ultranet/coroutine/channel.hpp
         ultranet/io/io_engine.hpp
         ultranet/io/io_awaitable.hpp
         ultranet/io/timer.hpp
         ultranet/io/io_callback.hpp
+        ultranet/io/reactor.hpp
         ultranet/buffer/buffer.h
         ultranet/net/socket.hpp
+        ultranet/net/bind.hpp
         ultranet/net/listen.hpp
         ultranet/net/accept.hpp
         ultranet/net/read.hpp
         ultranet/net/write.hpp
-        ultranet/net/connect.hpp
         ultranet/net/close.hpp
+        ultranet/net/connect.hpp
+        ultranet/net/sendto.hpp
+        ultranet/net/recvfrom.hpp
+        ultranet/net/shutdown.hpp
+        ultranet/net/dns.hpp
+        ultranet/metrics/counter.hpp
+        ultranet/metrics/gauge.hpp
+        ultranet/metrics/histogram.hpp
+        ultranet/metrics/registry.hpp
+        ultranet/log/logger.hpp
+        ultranet/trace/span.hpp
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/ultranet
 )
 
@@ -163,6 +205,7 @@ install(FILES
 
 # Subdirectories
 if(ULTRANET_BUILD_TESTS)
+    enable_testing()
     add_subdirectory(tests)
 endif()
 

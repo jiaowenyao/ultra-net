@@ -43,6 +43,12 @@
 #include "ultranet/net/recvfrom.hpp"
 #include "ultranet/net/shutdown.hpp"
 #include "ultranet/net/dns.hpp"
+#include "ultranet/metrics/counter.hpp"
+#include "ultranet/metrics/gauge.hpp"
+#include "ultranet/metrics/histogram.hpp"
+#include "ultranet/metrics/registry.hpp"
+#include "ultranet/log/logger.hpp"
+#include "ultranet/trace/span.hpp"
 
 // Version information
 #define ULTRANET_VERSION_MAJOR 0
