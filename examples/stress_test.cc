@@ -135,7 +135,10 @@ Task<void> stress_client(int id, const StressConfig& cfg,
         ++count;
     }
 
-    co_await Close(fd);
+    auto close_res = co_await Close(fd);
+    if (!close_res) {
+        errs.fetch_add(1); g_err_c->inc();
+    }
     co_return;
 }
 
@@ -143,19 +146,34 @@ static void run_client_sequential(const StressConfig& cfg,
                                    std::atomic<int64_t>& ops, std::atomic<int64_t>& errs,
                                    std::atomic<int64_t>& tos) {
     IoUringEngine::Scope engine_scope;
+    int fd_start = count_fds();
+    int fd_leaked = 0;
     for (int i = 0; i < cfg.concurrency; ++i) {
+        int fd_before = count_fds();
         auto task = stress_client(i, cfg, ops, errs, tos);
         task.resume();
         while (!task.handle().done()) {
             if (auto* eng = IoUringEngine::current()) {
-                eng->for_each_cqe([](io_uring_cqe* cqe) {
+                eng->for_each_cqe([eng](io_uring_cqe* cqe) {
                     auto* cb = reinterpret_cast<IoCallback*>(io_uring_cqe_get_data(cqe));
-                    if (cb) { cb->m_result = cqe->res; cb->m_completed = true; }
+                    if (cb) {
+                        cb->m_result = cqe->res;
+                        cb->m_completed = true;
+                        eng->decrement_pending_ops();
+                    }
                 });
+                eng->submit_now();
             }
             task.handle().resume();
         }
+        int fd_after = count_fds();
+        if (fd_after > fd_before) {
+            if (cfg.verbose) std::cerr << "client " << i << " leaked " << (fd_after - fd_before) << " FDs\n";
+            fd_leaked += (fd_after - fd_before);
+        }
     }
+    if (fd_leaked > 0 && cfg.verbose)
+        std::cerr << "total leaked: " << fd_leaked << " FDs across " << cfg.concurrency << " clients\n";
 }
 
 static TestReport run_test(const StressConfig& cfg) {

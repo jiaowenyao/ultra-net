@@ -195,6 +195,7 @@ private:
     ~IoUringEngine() {
         if (m_ring.ring_fd >= 0) {
             io_uring_submit(&m_ring);
+            m_buffer_groups.clear();
             io_uring_queue_exit(&m_ring);
         }
     }

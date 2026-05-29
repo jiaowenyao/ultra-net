@@ -31,6 +31,11 @@ public:
     }
 
     void resubmit() override {
+        if (m_callback.m_has_deadline && m_callback.is_expired()) {
+            m_callback.m_result = -ETIMEDOUT;
+            m_callback.m_completed = true;
+            return;
+        }
         auto* ctx = IoUringEngine::current();
         auto* new_sqe = ctx->get_sqe();
         if (new_sqe) {

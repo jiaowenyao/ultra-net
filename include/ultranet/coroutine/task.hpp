@@ -21,7 +21,10 @@ struct TaskPromiseBase {
     static void* operator new(std::size_t size) {
         return ::operator new(size);
     }
-    static void operator delete(void* ptr, std::size_t size) {
+    static void operator delete(void* ptr, std::size_t /*size*/) {
+        ::operator delete(ptr);
+    }
+    static void operator delete(void* ptr) {
         ::operator delete(ptr);
     }
 
@@ -186,7 +189,7 @@ public:
 
     Task& operator=(Task&& other) noexcept {
         if (std::addressof(other) != this) [[likely]] {
-            if (m_handle) {
+            if (m_handle && m_handle.done()) {
                 m_handle.destroy();
             }
             m_handle = std::move(other.m_handle);
