@@ -81,6 +81,9 @@ set(ULTRANET_PUBLIC_HEADERS
     include/ultranet/net/recvfrom.hpp
     include/ultranet/net/shutdown.hpp
     include/ultranet/net/dns.hpp
+    include/ultranet/net/error.hpp
+    include/ultranet/net/tcp_socket.hpp
+    include/ultranet/coroutine/when_all.hpp
     include/ultranet/metrics/counter.hpp
     include/ultranet/metrics/gauge.hpp
     include/ultranet/metrics/histogram.hpp
@@ -155,6 +158,9 @@ install(FILES
         ultranet/net/recvfrom.hpp
         ultranet/net/shutdown.hpp
         ultranet/net/dns.hpp
+        ultranet/net/error.hpp
+        ultranet/net/tcp_socket.hpp
+        ultranet/coroutine/when_all.hpp
         ultranet/metrics/counter.hpp
         ultranet/metrics/gauge.hpp
         ultranet/metrics/histogram.hpp
