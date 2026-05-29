@@ -118,7 +118,7 @@ int main() {
 
         auto server = echo_server(8080);
 
-        pool.submit(server.task());
+        pool.submit(server.release());
 
         pool.wait_all();
 

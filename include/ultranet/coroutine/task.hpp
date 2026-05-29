@@ -7,19 +7,17 @@
 #include <assert.h>
 #include <format>
 #include "ultranet/utils/noncopyable.h"
-#include "scheduler.h"
 #include "execution_context.hpp"
 
 
 namespace ynet::async {
 
 struct TaskPromiseBase {
-    TaskPromiseBase() {
-        m_creator_scheduler = ExecutionContext::current();
-    }
+    using NotifyFn = void (*)(void* ctx);
+
+    TaskPromiseBase() = default;
 
     // 强制堆分配，阻止编译器 HALO 优化将协程帧放在栈上
-    // 协程被提交到线程池后生命周期脱离调用栈，栈上分配会导致 use-after-free
     static void* operator new(std::size_t size) {
         return ::operator new(size);
     }
@@ -27,24 +25,20 @@ struct TaskPromiseBase {
         ::operator delete(ptr);
     }
 
+    void notify_complete() noexcept {
+        if (m_notify_fn) m_notify_fn(m_notify_ctx);
+    }
+
     // 最终的等待器
     struct TaskFinalAwaiter {
-        // 总是挂起进入清理流程
         constexpr bool await_ready() const noexcept {
             return false;
         }
 
-        /** 
-         * callee: 当前被挂起的协程
-         * return: void或者下一个要恢复的协程句柄
-         */
         template <typename T>
         std::coroutine_handle<> await_suspend(std::coroutine_handle<T> callee) const noexcept {
             auto& promise = callee.promise();
-            auto* scheduler = promise.m_creator_scheduler;
-            if (scheduler != nullptr) {
-                scheduler->decrement_tasks();
-            }
+            promise.notify_complete();
 
             std::coroutine_handle<> parent = promise.m_caller;
             promise.m_caller = nullptr;
@@ -54,7 +48,6 @@ struct TaskPromiseBase {
             }
 
             if (promise.m_ex != nullptr) [[unlikely]] {
-                // 处理未捕获的异常
                 try {
                     std::rethrow_exception(promise.m_ex);
                 }
@@ -86,7 +79,8 @@ struct TaskPromiseBase {
 
     std::atomic<std::coroutine_handle<>> m_caller{nullptr};
     std::exception_ptr m_ex{nullptr};
-    Scheduler* m_creator_scheduler{nullptr};
+    NotifyFn m_notify_fn{nullptr};
+    void* m_notify_ctx{nullptr};
 };
 
 template <typename T>
@@ -165,7 +159,7 @@ private:
 
             callee_promise.m_caller.store(caller, std::memory_order_release);
 
-            if (auto* scheduler = callee_promise.m_creator_scheduler) {
+            if (auto* scheduler = ExecutionContext::current()) {
                 scheduler->submit(m_callee);
                 return std::noop_coroutine();
             }
@@ -230,16 +224,16 @@ public:
         return Awaitable(m_handle);
     }
 
-    std::coroutine_handle<promise_type> task() {
+    std::coroutine_handle<promise_type> release() {
         if (m_handle == nullptr) [[unlikely]] {
-            throw std::logic_error("m_handle is nullptr");
+            throw std::logic_error("Task handle already released");
         }
         auto res = std::move(m_handle);
         m_handle = nullptr;
         return res;
     }
 
-    std::coroutine_handle<promise_type> handle() {
+    std::coroutine_handle<promise_type> handle() noexcept {
         return m_handle;
     }
 

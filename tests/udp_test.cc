@@ -434,7 +434,7 @@ Task<void> test_concurrent_udp_echo(scheduling::WorkStealingThreadPool& pool) {
         co_return;
     };
 
-    pool.submit(server_handler(sfd, 5).task());
+    pool.submit(server_handler(sfd, 5).release());
 
     // 5 clients
     for (int c = 0; c < 5; ++c) {
@@ -472,31 +472,31 @@ int main() {
         {
             ExecutionContext::Scope scope(&pool);
 
-            pool.submit(test_basic_udp_echo(pool).task());
+            pool.submit(test_basic_udp_echo(pool).release());
             pool.wait_all();
 
-            pool.submit(test_udp_timeout(pool).task());
+            pool.submit(test_udp_timeout(pool).release());
             pool.wait_all();
 
-            pool.submit(test_udp_connected(pool).task());
+            pool.submit(test_udp_connected(pool).release());
             pool.wait_all();
 
-            pool.submit(test_datagram_boundaries(pool).task());
+            pool.submit(test_datagram_boundaries(pool).release());
             pool.wait_all();
 
-            pool.submit(test_multiple_senders(pool).task());
+            pool.submit(test_multiple_senders(pool).release());
             pool.wait_all();
 
-            pool.submit(test_zero_length_datagram(pool).task());
+            pool.submit(test_zero_length_datagram(pool).release());
             pool.wait_all();
 
-            pool.submit(test_recvfrom_flags(pool).task());
+            pool.submit(test_recvfrom_flags(pool).release());
             pool.wait_all();
 
-            pool.submit(test_sendto_invalid_addr(pool).task());
+            pool.submit(test_sendto_invalid_addr(pool).release());
             pool.wait_all();
 
-            pool.submit(test_concurrent_udp_echo(pool).task());
+            pool.submit(test_concurrent_udp_echo(pool).release());
             pool.wait_all();
         }
     } catch (const std::exception& e) {

@@ -42,8 +42,8 @@ int main() {
 
     // task.handle().resume();
 
-    pool.submit(task1.task());
-    pool.submit(task2.task());
+    pool.submit(task1.release());
+    pool.submit(task2.release());
 
     pool.wait_all();
 

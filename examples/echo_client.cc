@@ -69,7 +69,7 @@ int main(int argc, char* argv[]) {
         ExecutionContext::Scope scope(&pool);
 
         auto client_task = echo_client(host, port);
-        pool.submit(client_task.task());
+        pool.submit(client_task.release());
 
         pool.wait_all();
     } catch (const std::exception& e) {

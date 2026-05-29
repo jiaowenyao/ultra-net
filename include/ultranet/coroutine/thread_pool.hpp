@@ -3,8 +3,7 @@
 #include "scheduler.h"
 #include "execution_context.hpp"
 #include "task.hpp"
-#include "ultranet/io/io_engine.hpp"
-#include "ultranet/io/io_callback.hpp"
+#include "ultranet/io/reactor.hpp"
 #include "queue.hpp"
 #include "mpsc_queue.hpp"
 #include <thread>
@@ -80,19 +79,19 @@ public:
         resubmit_coroutine(handle);
     }
 
-    bool is_current_thread() const override {
+    bool is_current_thread() const {
         return t_thread_local_state.pool == this;
     }
 
-    const char* name() const noexcept override {
+    const char* name() const noexcept {
         return "WorkStealingThreadPool";
     }
 
-    size_t worker_count() const noexcept override {
+    size_t worker_count() const noexcept {
         return m_workers.size();
     }
 
-    size_t pending_tasks() const noexcept override {
+    size_t pending_tasks() const noexcept {
         size_t total = 0;
         for (const auto& q : m_mpsc_queues) {
             total += q->approximate_size();
@@ -103,22 +102,22 @@ public:
         return total;
     }
 
-    void increment_tasks() noexcept override {
+    void increment_tasks() noexcept {
         m_active_tasks.fetch_add(1, std::memory_order_relaxed);
     }
 
-    void decrement_tasks() noexcept override {
+    void decrement_tasks() noexcept {
         if (m_active_tasks.fetch_sub(1, std::memory_order_acq_rel) == 1) {
             std::lock_guard<std::mutex> lock(m_completion_mutex);
             m_completion_cv.notify_all();
         }
     }
 
-    size_t total_submitted_ops() const noexcept override {
+    size_t total_submitted_ops() const noexcept {
         return m_stats.submitted_ops.load(std::memory_order_relaxed);
     }
 
-    size_t total_completed_ops() const noexcept override {
+    size_t total_completed_ops() const noexcept {
         return m_stats.completed_ops.load(std::memory_order_relaxed);
     }
 
@@ -141,9 +140,17 @@ public:
 
     void submit_coroutine(std::coroutine_handle<> handle) {
         if (!handle || handle.done()) return;
+        auto typed = std::coroutine_handle<TaskPromiseBase>::from_address(handle.address());
+        auto& promise = typed.promise();
+        promise.m_notify_fn = &WorkStealingThreadPool::on_task_complete;
+        promise.m_notify_ctx = this;
         increment_tasks();
         UnifiedTask task(handle);
         enqueue_task(std::move(task));
+    }
+
+    static void on_task_complete(void* ctx) noexcept {
+        static_cast<WorkStealingThreadPool*>(ctx)->decrement_tasks();
     }
 
     void resubmit_coroutine(std::coroutine_handle<> handle) {
@@ -172,10 +179,7 @@ public:
 
     template <typename T>
     void submit_task(Task<T>& task) {
-        if (task.handle()) {
-            task.handle().promise().m_creator_scheduler = this;
-        }
-        submit_coroutine(task.task());
+        submit_coroutine(task.release());
     }
 
     template<typename F, typename... Args>
@@ -228,11 +232,6 @@ private:
         std::atomic<size_t> completed_ops{0};
     };
 
-    struct WakeupCallback : io::IoOperationBase {
-        void resubmit() override {}
-        void cancel() override {}
-    };
-
     void wake_workers(uint64_t count = 1) {
         uint64_t val = count;
         ::write(m_event_fd, &val, sizeof(val));
@@ -274,48 +273,24 @@ private:
         return false;
     }
 
-    void process_io_completions() {
-        auto* ctx = io::IoUringEngine::current();
-        if (!ctx) return;
+    static void on_io_completion(void* ctx, io_uring_cqe* cqe) {
+        auto* pool = static_cast<WorkStealingThreadPool*>(ctx);
+        auto* callback = reinterpret_cast<io::IoCallback*>(io_uring_cqe_get_data(cqe));
+        if (!callback) return;
 
-        ctx->for_each_cqe([this, ctx](io_uring_cqe* cqe) {
-            auto* callback = reinterpret_cast<io::IoCallback*>(io_uring_cqe_get_data(cqe));
-            if (!callback) {
-                return;
+        callback->m_result = cqe->res;
+        callback->m_completed = true;
+
+        if (cqe->res == -EAGAIN || cqe->res == -EINTR) {
+            if (callback->m_operation) {
+                auto* op = static_cast<io::IoOperationBase*>(callback->m_operation);
+                op->resubmit();
             }
-
-            callback->m_result = cqe->res;
-            callback->m_completed = true;
-
-            if (callback == &m_wakeup_cb) {
-                uint64_t val;
-                ::read(m_event_fd, &val, sizeof(val));
-                submit_eventfd_read();
-                return;
-            }
-
-            if (cqe->res == -EAGAIN || cqe->res == -EINTR) {
-                if (callback->m_operation) {
-                    auto* op = static_cast<io::IoOperationBase*>(callback->m_operation);
-                    op->resubmit();
-                }
-            } else if (callback->m_handle) {
-                ctx->decrement_pending_ops();
-                record_completion();
-                resubmit_coroutine(callback->m_handle);
-            }
-        });
-    }
-
-    void submit_eventfd_read() {
-        auto* ctx = io::IoUringEngine::current();
-        if (!ctx) return;
-        auto* sqe = ctx->get_sqe();
-        if (sqe) {
-            io_uring_prep_read(sqe, m_event_fd, &m_eventfd_buf, sizeof(m_eventfd_buf), 0);
-            io_uring_sqe_set_data(sqe, &m_wakeup_cb);
-            ctx->increment_pending();
-            ctx->submit_now();
+        } else if (callback->m_handle) {
+            auto* engine = io::IoUringEngine::current();
+            if (engine) engine->decrement_pending_ops();
+            pool->record_completion();
+            pool->resubmit_coroutine(callback->m_handle);
         }
     }
 
@@ -324,19 +299,17 @@ private:
         t_thread_local_state.worker_id = worker_id;
 
         ExecutionContext::Scope context_scope(this);
-        io::IoUringEngine::Scope io_uring_scope{};
-
-        submit_eventfd_read();
+        io::IoReactor reactor(m_event_fd, &WorkStealingThreadPool::on_io_completion, this);
 
         while (!m_stop.load(std::memory_order_acquire)) {
-            process_io_completions();
+            reactor.poll();
 
             std::optional<UnifiedTask> task;
             if ((task = try_get_local_task(worker_id))) { (*task)(); continue; }
             if (try_steal_task(worker_id, task)) { (*task)(); continue; }
             if (try_get_from_mpsc(worker_id, task)) { (*task)(); continue; }
 
-            wait_on_io();
+            reactor.wait_for_events();
         }
 
         while (auto t = m_local_queues[worker_id]->pop()) { (*t)(); }
@@ -344,15 +317,6 @@ private:
 
         t_thread_local_state.pool = nullptr;
         t_thread_local_state.worker_id = static_cast<size_t>(-1);
-    }
-
-    void wait_on_io() {
-        auto* ctx = io::IoUringEngine::current();
-        if (!ctx) return;
-        ctx->flush_submit();
-        struct __kernel_timespec ts = {5, 0};
-        io_uring_cqe* cqe = nullptr;
-        ctx->wait_cqe(&cqe, 1, &ts);
     }
 
     std::vector<std::thread> m_workers;
@@ -365,8 +329,6 @@ private:
     std::atomic<size_t> m_active_tasks;
     Stats m_stats{};
     int m_event_fd{-1};
-    uint64_t m_eventfd_buf{0};
-    io::IoCallback m_wakeup_cb{};
 
     struct ThreadLocalState {
         WorkStealingThreadPool* pool = nullptr;

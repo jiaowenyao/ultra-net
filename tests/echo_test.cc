@@ -121,7 +121,7 @@ Task<void> echo_server(int port, scheduling::WorkStealingThreadPool& pool) {
         g_stats.client_connected++;
 
         auto session = echo_session(*client);
-        pool.submit(session.task());
+        pool.submit(session.release());
     }
 
     co_await Close(listen_fd);
@@ -195,12 +195,12 @@ int main() {
         ExecutionContext::Scope scope(&pool);
 
         auto server_task = echo_server(18080, pool);
-        pool.submit(server_task.task());
+        pool.submit(server_task.release());
 
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
         auto client_task = tcp_client(18080);
-        pool.submit(client_task.task());
+        pool.submit(client_task.release());
 
         pool.wait_all();
 

@@ -55,7 +55,7 @@ Task<void> test_blocking_read(scheduling::WorkStealingThreadPool& pool) {
     std::atomic<bool> reader_done{false};
 
     auto reader_task = blocking_read_reader(ch, &reader_done);
-    pool.submit(reader_task.task());
+    pool.submit(reader_task.release());
 
     co_await io::sleep_for(std::chrono::milliseconds(50));
     CO_CHECK(!reader_done.load(), "reader should be suspended");
@@ -86,7 +86,7 @@ Task<void> test_blocking_write(scheduling::WorkStealingThreadPool& pool) {
 
     std::atomic<bool> writer_done{false};
     auto writer_task = blocking_write_writer(ch, &writer_done);
-    pool.submit(writer_task.task());
+    pool.submit(writer_task.release());
 
     co_await io::sleep_for(std::chrono::milliseconds(50));
     CO_CHECK(!writer_done.load(), "writer should be suspended");
@@ -140,7 +140,7 @@ Task<void> test_close_wakes_reader(scheduling::WorkStealingThreadPool& pool) {
     bool got_null = false;
 
     auto reader_task = close_wake_reader(ch, &reader_done, &got_null);
-    pool.submit(reader_task.task());
+    pool.submit(reader_task.release());
 
     co_await io::sleep_for(std::chrono::milliseconds(50));
     CO_CHECK(!reader_done.load(), "reader should be suspended");
@@ -195,10 +195,10 @@ Task<void> test_mp_sc(scheduling::WorkStealingThreadPool& pool) {
 
     for (int p = 0; p < NUM_PRODUCERS; ++p) {
         auto t = mp_sc_producer(ch, p, ITEMS_PER, &total_sent, &producers_done);
-        pool.submit(t.task());
+        pool.submit(t.release());
     }
     auto ct = mp_sc_consumer(ch, &sum, &count, NUM_PRODUCERS * ITEMS_PER);
-    pool.submit(ct.task());
+    pool.submit(ct.release());
 
     while (producers_done.load() < NUM_PRODUCERS ||
            count.load() < NUM_PRODUCERS * ITEMS_PER) {
@@ -278,9 +278,9 @@ Task<void> test_pipeline(scheduling::WorkStealingThreadPool& pool) {
     auto t1 = pipeline_stage1(ch1);
     auto t2 = pipeline_stage2(ch1, ch2);
     auto t3 = pipeline_stage3(ch2, results);
-    pool.submit(t1.task());
-    pool.submit(t2.task());
-    pool.submit(t3.task());
+    pool.submit(t1.release());
+    pool.submit(t2.release());
+    pool.submit(t3.release());
 
     co_await io::sleep_for(std::chrono::milliseconds(200));
     CO_CHECK(results->size() == 10, "pipeline result count mismatch");
@@ -337,8 +337,8 @@ Task<void> test_producer_closes(scheduling::WorkStealingThreadPool& pool) {
 
     auto pt = pc_producer(ch);
     auto ct = pc_consumer(ch, results);
-    pool.submit(pt.task());
-    pool.submit(ct.task());
+    pool.submit(pt.release());
+    pool.submit(ct.release());
 
     co_await io::sleep_for(std::chrono::milliseconds(200));
     CO_CHECK(results->size() == 50, "result count mismatch");
@@ -359,34 +359,34 @@ int main() {
         {
             ExecutionContext::Scope scope(&pool);
 
-            pool.submit(test_basic_push_pop(pool).task());
+            pool.submit(test_basic_push_pop(pool).release());
             pool.wait_all();
 
-            pool.submit(test_blocking_read(pool).task());
+            pool.submit(test_blocking_read(pool).release());
             pool.wait_all();
 
-            pool.submit(test_blocking_write(pool).task());
+            pool.submit(test_blocking_write(pool).release());
             pool.wait_all();
 
-            pool.submit(test_close_semantics(pool).task());
+            pool.submit(test_close_semantics(pool).release());
             pool.wait_all();
 
-            pool.submit(test_close_wakes_reader(pool).task());
+            pool.submit(test_close_wakes_reader(pool).release());
             pool.wait_all();
 
-            pool.submit(test_mp_sc(pool).task());
+            pool.submit(test_mp_sc(pool).release());
             pool.wait_all();
 
-            pool.submit(test_try_ops(pool).task());
+            pool.submit(test_try_ops(pool).release());
             pool.wait_all();
 
-            pool.submit(test_pipeline(pool).task());
+            pool.submit(test_pipeline(pool).release());
             pool.wait_all();
 
-            pool.submit(test_string_channel(pool).task());
+            pool.submit(test_string_channel(pool).release());
             pool.wait_all();
 
-            pool.submit(test_producer_closes(pool).task());
+            pool.submit(test_producer_closes(pool).release());
             pool.wait_all();
         }
     } catch (const std::exception& e) {

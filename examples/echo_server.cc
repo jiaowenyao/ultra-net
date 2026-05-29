@@ -105,7 +105,7 @@ Task<void> echo_server(int port, scheduling::WorkStealingThreadPool& pool) {
         int client_fd = *client;
         std::cout << "Accepted connection: fd=" << client_fd << std::endl;
 
-        pool.submit(echo_session(client_fd, pool).task());
+        pool.submit(echo_session(client_fd, pool).release());
     }
 
     co_await Close(listen_fd);
@@ -124,7 +124,7 @@ int main(int argc, char* argv[]) {
         ExecutionContext::Scope scope(&pool);
 
         auto server_task = echo_server(port, pool);
-        pool.submit(server_task.task());
+        pool.submit(server_task.release());
 
         pool.wait_all();
     } catch (const std::exception& e) {

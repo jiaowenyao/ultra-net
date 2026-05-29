@@ -29,7 +29,7 @@ int main() {
 
     for (int i = 0; i < num_tasks; ++i) {
         auto task = simple_task(i);
-        pool.submit(task.task());
+        pool.submit(task.release());
     }
 
     pool.wait_all();

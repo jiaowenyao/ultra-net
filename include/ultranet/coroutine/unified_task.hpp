@@ -1,7 +1,8 @@
 #pragma once
-#include <functional>
 #include <coroutine>
-#include <memory>
+#include <functional>
+#include <variant>
+#include <type_traits>
 
 namespace ynet::async::scheduling {
 
@@ -14,48 +15,52 @@ namespace detail {
 
 template <typename T>
 inline constexpr bool is_coroutine_handle_v =
-    detail::is_coroutine_handle<std::remove_cvref<T>>::value;
+    detail::is_coroutine_handle<std::remove_cvref_t<T>>::value;
 
 class UnifiedTask {
-    struct TaskConcept {
-        virtual ~TaskConcept() = default;
-        virtual void execute() = 0;
-    };
-    template <typename Func>
-    struct FunctionTask : TaskConcept {
-        Func func;
-        template <typename F>
-        explicit FunctionTask(F&& f) : func(std::forward<F>(f)) {}
-        void execute() override { func(); }
-    };
-    template <typename Promise>
-    struct CoroutineTask : TaskConcept {
-        std::coroutine_handle<Promise> handle;
-        explicit CoroutineTask(std::coroutine_handle<Promise> h) : handle(h) {}
-        void execute() override {
-            if (handle && !handle.done()) {
-                handle.resume();
-            }
-        }
-    };
-    std::unique_ptr<TaskConcept> m_impl;
+    using TaskVariant = std::variant<std::coroutine_handle<>, std::function<void()>>;
+    TaskVariant m_task;
+
 public:
     UnifiedTask() = default;
+
+    template <typename Promise>
+    UnifiedTask(std::coroutine_handle<Promise> handle) noexcept
+        : m_task(std::coroutine_handle<>(handle)) {}
+
     template <typename Func>
         requires(std::is_invocable_v<std::decay_t<Func>>
                 && !std::is_same_v<std::decay_t<Func>, UnifiedTask>
                 && !is_coroutine_handle_v<Func>)
     UnifiedTask(Func&& func)
-        : m_impl(std::make_unique<FunctionTask<std::decay_t<Func>>>(std::forward<Func>(func))) {}
-    template <typename Promise>
-    UnifiedTask(std::coroutine_handle<Promise> handle)
-        : m_impl(std::make_unique<CoroutineTask<Promise>>(handle)) {}
+        : m_task(std::function<void()>(std::forward<Func>(func))) {}
+
     UnifiedTask(UnifiedTask&&) noexcept = default;
     UnifiedTask& operator=(UnifiedTask&&) noexcept = default;
     UnifiedTask(const UnifiedTask&) = delete;
     UnifiedTask& operator=(const UnifiedTask&) = delete;
-    void operator()() { if (m_impl) m_impl->execute(); }
-    explicit operator bool() const noexcept { return m_impl != nullptr; }
+
+    void operator()() {
+        std::visit([](auto& task) {
+            using T = std::decay_t<decltype(task)>;
+            if constexpr (std::is_same_v<T, std::coroutine_handle<>>) {
+                if (task && !task.done()) task.resume();
+            } else {
+                if (task) task();
+            }
+        }, m_task);
+    }
+
+    explicit operator bool() const noexcept {
+        return std::visit([](auto& task) -> bool {
+            using T = std::decay_t<decltype(task)>;
+            if constexpr (std::is_same_v<T, std::coroutine_handle<>>) {
+                return task != nullptr;
+            } else {
+                return static_cast<bool>(task);
+            }
+        }, m_task);
+    }
 };
 
-}
+} // namespace ynet::async::scheduling

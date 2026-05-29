@@ -106,7 +106,7 @@ Task<void> http_server(int port, scheduling::WorkStealingThreadPool& pool) {
             continue;
         }
 
-        pool.submit(handle_http(*client, pool).task());
+        pool.submit(handle_http(*client, pool).release());
     }
 
     co_await Close(listen_fd);
@@ -125,7 +125,7 @@ int main(int argc, char* argv[]) {
         ExecutionContext::Scope scope(&pool);
 
         auto server_task = http_server(port, pool);
-        pool.submit(server_task.task());
+        pool.submit(server_task.release());
 
         pool.wait_all();
     } catch (const std::exception& e) {

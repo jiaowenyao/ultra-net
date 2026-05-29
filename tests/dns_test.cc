@@ -78,19 +78,19 @@ int main() {
         {
             ExecutionContext::Scope scope(&pool);
 
-            pool.submit(test_resolve_localhost(pool).task());
+            pool.submit(test_resolve_localhost(pool).release());
             pool.wait_all();
 
-            pool.submit(test_resolve_external(pool).task());
+            pool.submit(test_resolve_external(pool).release());
             pool.wait_all();
 
-            pool.submit(test_resolve_nonexistent(pool).task());
+            pool.submit(test_resolve_nonexistent(pool).release());
             pool.wait_all();
 
-            pool.submit(test_resolve_timeout(pool).task());
+            pool.submit(test_resolve_timeout(pool).release());
             pool.wait_all();
 
-            pool.submit(test_resolve_multiple(pool).task());
+            pool.submit(test_resolve_multiple(pool).release());
             pool.wait_all();
         }
     } catch (const std::exception& e) {

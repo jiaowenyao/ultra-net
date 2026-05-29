@@ -16,7 +16,7 @@
  * Example usage:
  *
  *   WorkStealingThreadPool pool(4);
- *   pool.submit(my_coroutine().task());
+ *   pool.submit(my_coroutine().release());
  *   pool.wait_all();
  */
 
@@ -27,6 +27,7 @@
 #include "execution_context.hpp"
 #include "ultranet/io/io_engine.hpp"
 #include "ultranet/io/io_callback.hpp"
+#include "ultranet/io/reactor.hpp"
 #include "ultranet/io/io_awaitable.hpp"
 #include "ultranet/io/timer.hpp"
 #include "ultranet/buffer/buffer.h"
