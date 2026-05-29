@@ -36,6 +36,12 @@ set(TEST_SOURCES
     tcp_socket_test.cc
     when_all_test.cc
     when_any_test.cc
+    config_test.cc
+    shutdown_test.cc
+    circuit_breaker_test.cc
+    retry_test.cc
+    connection_pool_test.cc
+    http_test.cc
 )
 
 foreach(test_src ${TEST_SOURCES})

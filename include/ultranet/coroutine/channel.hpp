@@ -149,7 +149,7 @@ class Channel {
                     m_channel->wake_one_writer_nolock();
                 }
             }
-            return m_value;
+            return std::move(m_value);
         }
 
     private:

@@ -84,6 +84,12 @@ set(ULTRANET_PUBLIC_HEADERS
     include/ultranet/net/error.hpp
     include/ultranet/net/tcp_socket.hpp
     include/ultranet/coroutine/when_all.hpp
+    include/ultranet/coroutine/circuit_breaker.hpp
+    include/ultranet/coroutine/retry.hpp
+    include/ultranet/lifecycle/shutdown.hpp
+    include/ultranet/config/config.hpp
+    include/ultranet/net/connection_pool.hpp
+    include/ultranet/net/http.hpp
     include/ultranet/metrics/counter.hpp
     include/ultranet/metrics/gauge.hpp
     include/ultranet/metrics/histogram.hpp
@@ -161,6 +167,12 @@ install(FILES
         ultranet/net/error.hpp
         ultranet/net/tcp_socket.hpp
         ultranet/coroutine/when_all.hpp
+        ultranet/coroutine/circuit_breaker.hpp
+        ultranet/coroutine/retry.hpp
+        ultranet/lifecycle/shutdown.hpp
+        ultranet/config/config.hpp
+        ultranet/net/connection_pool.hpp
+        ultranet/net/http.hpp
         ultranet/metrics/counter.hpp
         ultranet/metrics/gauge.hpp
         ultranet/metrics/histogram.hpp
