@@ -14,6 +14,7 @@
 #include <unistd.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <arpa/inet.h>
 
 namespace ynet::async::net {
 
@@ -67,7 +68,16 @@ inline ynet::async::Task<TcpSocket> TcpSocket::connect(
     const std::string& host, uint16_t port,
     std::chrono::milliseconds timeout) {
 
-    auto ips = co_await io::resolve_host(host, timeout);
+    std::vector<std::string> ips;
+
+    // Check if host is already an IP address
+    sockaddr_in check{};
+    if (inet_pton(AF_INET, host.c_str(), &check.sin_addr) == 1) {
+        ips.push_back(host);
+    } else {
+        ips = co_await io::resolve_host(host, timeout);
+    }
+
     std::error_code last_error;
 
     for (const auto& ip : ips) {

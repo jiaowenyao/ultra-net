@@ -276,14 +276,14 @@ public:
         auto ws_key = req.header("sec-websocket-key");
         auto version = req.header("sec-websocket-version");
 
-        // Validate headers
-        bool upgrade_ok = false;
-        for (auto& c : std::string(upgrade)) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-        if (upgrade.find("websocket") != std::string::npos) upgrade_ok = true;
-
-        bool conn_ok = false;
-        for (auto& c : std::string(connection)) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-        if (connection.find("upgrade") != std::string::npos) conn_ok = true;
+        // Validate headers (case-insensitive)
+        auto lower = [](std::string_view sv) {
+            std::string s(sv);
+            for (auto& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            return s;
+        };
+        bool upgrade_ok = lower(upgrade).find("websocket") != std::string::npos;
+        bool conn_ok = lower(connection).find("upgrade") != std::string::npos;
 
         if (!upgrade_ok || !conn_ok || ws_key.empty() || version != "13") {
             co_return io::make_io_error(EPROTO);
@@ -310,18 +310,22 @@ public:
     }
 
     Task<WebSocketFrame> read_frame() {
-        uint8_t buf[4096];
+        std::vector<uint8_t> buf;
         while (true) {
-            auto r = co_await m_socket.read(buf, sizeof(buf));
+            size_t existing = buf.size();
+            buf.resize(existing + 4096);
+            auto r = co_await m_socket.read(buf.data() + existing, 4096);
             if (!r) throw std::system_error(r.error(), "websocket read failed");
             if (*r == 0) throw std::system_error(io::make_io_error(ECONNRESET), "websocket connection closed");
+            buf.resize(existing + *r);
 
             size_t consumed = 0;
             WebSocketFrame frame;
-            if (WebSocketFrame::decode(buf, *r, consumed, frame)) {
+            if (WebSocketFrame::decode(buf.data(), buf.size(), consumed, frame)) {
                 if (frame.opcode == OpCode::Ping) {
                     auto pong = WebSocketFrame::pong(frame.payload);
                     co_await write_frame(pong);
+                    buf.erase(buf.begin(), buf.begin() + consumed);
                     continue;
                 }
                 if (frame.opcode == OpCode::Close) {
@@ -335,22 +339,20 @@ public:
     }
 
     Task<void> write_frame(const WebSocketFrame& frame) {
-        bool mask = m_masked;
-        uint32_t mk = 0;
-        auto encoded = frame.encode(mask);
+        auto encoded = frame.encode(m_masked);
 
         // Build header + payload for Writev
         size_t hdr_end = 2;
         uint64_t plen = frame.payload.size();
         if (plen >= 126 && plen <= 65535) hdr_end = 4;
         else if (plen > 65535) hdr_end = 10;
-        if (mask) hdr_end += 4;
+        if (m_masked) hdr_end += 4;
 
         iovec iov[2];
         iov[0].iov_base = const_cast<uint8_t*>(encoded.data());
         iov[0].iov_len = hdr_end;
-        iov[1].iov_base = const_cast<char*>(frame.payload.data());
-        iov[1].iov_len = frame.payload.size();
+        iov[1].iov_base = encoded.data() + hdr_end;
+        iov[1].iov_len = encoded.size() - hdr_end;
 
         auto w = co_await io::Writev(m_socket.fd(), iov, 2);
         if (!w) throw std::system_error(w.error(), "websocket write failed");
