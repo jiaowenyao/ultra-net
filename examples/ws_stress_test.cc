@@ -195,7 +195,7 @@ void run_burst(int port) {
     for (int c : cons) {
         WsStressConfig cfg;
         cfg.name = "burst-c" + std::to_string(c);
-        cfg.port = port; cfg.concurrency = c; cfg.messages = 200; cfg.payload_size = 64;
+        cfg.port = port; cfg.concurrency = c; cfg.messages = 500; cfg.payload_size = 64;
         auto r = run_test(cfg);
         double err_pct = (r.total_ops + r.total_errors + r.total_timeouts) > 0
             ? 100.0 * (r.total_errors + r.total_timeouts) / (r.total_ops + r.total_errors + r.total_timeouts) : 0;
@@ -245,11 +245,11 @@ void run_msg_sizes(int port) {
 }
 
 void run_longhaul(int port) {
-    std::cout << "\n=== WebSocket Long-Haul Stability (5s sustained) ===\n";
-    for (int c : {1, 4, 16}) {
+    std::cout << "\n=== WebSocket Long-Haul Stability (10s sustained) ===\n";
+    for (int c : {1, 4, 16, 32}) {
         WsStressConfig cfg;
-        cfg.name = "longhaul-c" + std::to_string(c) + "-5s";
-        cfg.port = port; cfg.concurrency = c; cfg.duration_sec = 5; cfg.payload_size = 256;
+        cfg.name = "longhaul-c" + std::to_string(c) + "-10s";
+        cfg.port = port; cfg.concurrency = c; cfg.duration_sec = 10; cfg.payload_size = 256;
         auto r = run_test(cfg);
         print_report(r);
     }

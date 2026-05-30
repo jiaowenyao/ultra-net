@@ -127,70 +127,31 @@ struct WebSocketFrame {
         return f;
     }
 
-    std::vector<uint8_t> encode(bool apply_mask = false) const {
-        size_t len = payload.size();
-        size_t hdr_size = 2;
-        if (len >= 126 && len <= 65535) hdr_size = 4;
-        else if (len > 65535) hdr_size = 10;
-        if (apply_mask) hdr_size += 4;
-
-        std::vector<uint8_t> result;
-        result.reserve(hdr_size + len);
-        encode_into_vec(result, apply_mask);
-        return result;
+    // Total wire size of an encoded frame (header + mask-key + payload).
+    static constexpr size_t encoded_size(size_t payload_len, bool apply_mask) {
+        size_t n = 2 + payload_len;
+        if (payload_len >= 126 && payload_len <= 65535) n += 2;
+        else if (payload_len > 65535) n += 8;
+        if (apply_mask) n += 4;
+        return n;
     }
 
-    // Encode into pre-allocated vector (avoids double-buffering)
-    void encode_into_vec(std::vector<uint8_t>& out, bool apply_mask) const {
-        size_t len = payload.size();
-
-        uint8_t b0 = static_cast<uint8_t>((fin ? 0x80 : 0) | static_cast<uint8_t>(opcode));
-        out.push_back(b0);
-
-        uint8_t b1 = apply_mask ? 0x80 : 0;
-        if (len < 126) {
-            b1 |= static_cast<uint8_t>(len);
-            out.push_back(b1);
-        } else if (len <= 65535) {
-            b1 |= 126;
-            out.push_back(b1);
-            out.push_back(static_cast<uint8_t>(len >> 8));
-            out.push_back(static_cast<uint8_t>(len & 0xFF));
-        } else {
-            b1 |= 127;
-            out.push_back(b1);
-            for (int i = 7; i >= 0; --i)
-                out.push_back(static_cast<uint8_t>(len >> (i * 8)));
-        }
-
-        if (apply_mask) {
-            uint32_t mk = masking_key;
-            if (mk == 0) {
-                std::random_device rd;
-                mk = static_cast<uint32_t>(rd()) ^ (static_cast<uint32_t>(rd()) << 16);
-            }
-            out.push_back(static_cast<uint8_t>(mk >> 24));
-            out.push_back(static_cast<uint8_t>(mk >> 16));
-            out.push_back(static_cast<uint8_t>(mk >> 8));
-            out.push_back(static_cast<uint8_t>(mk));
-            for (size_t i = 0; i < len; ++i)
-                out.push_back(static_cast<uint8_t>(payload[i]) ^ static_cast<uint8_t>((mk >> (8 * (3 - (i % 4)))) & 0xFF));
-        } else {
-            out.insert(out.end(), payload.begin(), payload.end());
-        }
+    std::vector<uint8_t> encode(bool apply_mask = false) const {
+        std::vector<uint8_t> result;
+        result.resize(encoded_size(payload.size(), apply_mask));
+        encode_into(result.data(), result.size(), apply_mask);
+        return result;
     }
 
     // Zero-allocation encode into caller-provided buffer.
     // Returns number of bytes written, or 0 if buffer too small.
     size_t encode_into(uint8_t* buf, size_t cap, bool apply_mask) const {
-        size_t len = payload.size();
-        size_t needed = 2 + len;
-        if (len >= 126 && len <= 65535) needed += 2;
-        else if (len > 65535) needed += 8;
-        if (apply_mask) needed += 4;
+        size_t needed = encoded_size(payload.size(), apply_mask);
         if (cap < needed) return 0;
 
         uint8_t* p = buf;
+        size_t len = payload.size();
+
         *p++ = static_cast<uint8_t>((fin ? 0x80 : 0) | static_cast<uint8_t>(opcode));
 
         uint8_t b1 = apply_mask ? 0x80 : 0;
@@ -268,6 +229,14 @@ struct WebSocketFrame {
 // === WebSocket ===
 
 class WebSocket : ynet::utils::Noncopyable {
+    // Stack buffer sizes for zero-alloc fast path.
+    // WS_READ_BUF covers most frames in a single read (8 KiB).
+    // WS_WRITE_BUF covers frames up to ~16 KiB payload without heap alloc.
+    // Beyond these, a heap fallback is used transparently.
+    static constexpr size_t WS_READ_BUF = 8192;
+    static constexpr size_t WS_WRITE_BUF = 16384;
+    static constexpr size_t WS_READ_CHUNK = 4096;
+
 public:
     explicit WebSocket(TcpSocket socket) noexcept : m_socket(std::move(socket)), m_masked(true) {}
 
@@ -368,10 +337,10 @@ public:
     }
 
     Task<WebSocketFrame> read_frame() {
-        uint8_t stack_buf[8192];
+        uint8_t stack_buf[WS_READ_BUF];
         std::vector<uint8_t> heap_buf;
         uint8_t* buf = stack_buf;
-        size_t cap = sizeof(stack_buf);
+        size_t cap = WS_READ_BUF;
         size_t total = 0;
 
         while (true) {
@@ -386,7 +355,6 @@ public:
                 if (frame.opcode == OpCode::Ping) {
                     auto pong = WebSocketFrame::pong(frame.payload);
                     co_await write_frame(pong);
-                    // Shift remaining data to front
                     if (consumed < total) {
                         size_t rem = total - consumed;
                         std::memmove(buf, buf + consumed, rem);
@@ -410,9 +378,8 @@ public:
                 buf = heap_buf.data();
                 cap = heap_buf.size();
             }
-            // Expand heap buffer
             if (total >= cap) {
-                heap_buf.resize(cap + 4096);
+                heap_buf.resize(cap + WS_READ_CHUNK);
                 buf = heap_buf.data();
                 cap = heap_buf.size();
             }
@@ -420,23 +387,17 @@ public:
     }
 
     Task<void> write_frame(const WebSocketFrame& frame) {
-        // Zero-allocation path: encode into stack buffer
-        uint8_t stack_buf[16384];
-        size_t n = frame.encode_into(stack_buf, sizeof(stack_buf), m_masked);
+        uint8_t stack_buf[WS_WRITE_BUF];
+        size_t n = frame.encode_into(stack_buf, WS_WRITE_BUF, m_masked);
         if (n > 0) {
             auto w = co_await m_socket.write(stack_buf, n);
             if (!w) throw std::system_error(w.error(), "websocket write failed");
             co_return;
         }
 
-        // Fallback: large frames use heap
+        // Large frame (>WS_WRITE_BUF): heap-allocated encode + writev
         auto encoded = frame.encode(m_masked);
-        size_t hdr_end = 2;
-        uint64_t plen = frame.payload.size();
-        if (plen >= 126 && plen <= 65535) hdr_end = 4;
-        else if (plen > 65535) hdr_end = 10;
-        if (m_masked) hdr_end += 4;
-
+        size_t hdr_end = WebSocketFrame::encoded_size(frame.payload.size(), m_masked) - frame.payload.size();
         iovec iov[2];
         iov[0].iov_base = const_cast<uint8_t*>(encoded.data());
         iov[0].iov_len = hdr_end;
