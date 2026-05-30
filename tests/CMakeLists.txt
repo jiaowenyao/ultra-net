@@ -42,6 +42,9 @@ set(TEST_SOURCES
     retry_test.cc
     connection_pool_test.cc
     http_test.cc
+    websocket_test.cc
+    dns_srv_test.cc
+    service_discovery_test.cc
 )
 
 foreach(test_src ${TEST_SOURCES})

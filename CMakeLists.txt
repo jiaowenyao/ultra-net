@@ -90,6 +90,8 @@ set(ULTRANET_PUBLIC_HEADERS
     include/ultranet/config/config.hpp
     include/ultranet/net/connection_pool.hpp
     include/ultranet/net/http.hpp
+    include/ultranet/net/websocket.hpp
+    include/ultranet/net/service_discovery.hpp
     include/ultranet/metrics/counter.hpp
     include/ultranet/metrics/gauge.hpp
     include/ultranet/metrics/histogram.hpp
@@ -173,6 +175,8 @@ install(FILES
         ultranet/config/config.hpp
         ultranet/net/connection_pool.hpp
         ultranet/net/http.hpp
+        ultranet/net/websocket.hpp
+        ultranet/net/service_discovery.hpp
         ultranet/metrics/counter.hpp
         ultranet/metrics/gauge.hpp
         ultranet/metrics/histogram.hpp

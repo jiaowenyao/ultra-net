@@ -202,4 +202,101 @@ inline ynet::async::Task<std::vector<std::string>> resolve_host(
     co_return results;
 }
 
+struct SrvRecord {
+    uint16_t priority;
+    uint16_t weight;
+    uint16_t port;
+    std::string target;
+};
+
+inline ynet::async::Task<std::vector<SrvRecord>> resolve_srv(
+    const std::string& service,
+    const std::string& protocol,
+    const std::string& domain,
+    std::chrono::milliseconds timeout = std::chrono::milliseconds(5000))
+{
+    std::vector<SrvRecord> results;
+    auto nameservers = detail::read_nameservers();
+    auto per_server_timeout = timeout / std::max(size_t(1), nameservers.size());
+
+    std::string qname = (service[0] == '_' ? service : "_" + service) + "."
+        + (protocol[0] == '_' ? protocol : "_" + protocol) + "."
+        + domain;
+
+    for (const auto& ns_ip : nameservers) {
+        auto sock = co_await Socket(AF_INET, SOCK_DGRAM, 0);
+        if (!sock) continue;
+        int fd = *sock;
+
+        sockaddr_in ns_addr{};
+        ns_addr.sin_family = AF_INET;
+        ns_addr.sin_port = htons(53);
+        inet_pton(AF_INET, ns_ip.c_str(), &ns_addr.sin_addr);
+
+        auto conn = co_await Connect(fd, (sockaddr*)&ns_addr, sizeof(ns_addr));
+        if (!conn) { co_await Close(fd); continue; }
+
+        uint8_t query[512] = {};
+        detail::DnsHeader hdr{};
+        hdr.id = 0x1a2b;
+        hdr.flags = 0x0100;
+        hdr.qdcount = 1;
+        hdr.encode(query);
+
+        size_t pos = 12;
+        pos += detail::encode_name(query + pos, qname);
+        query[pos++] = 0; query[pos++] = 33;  // QTYPE=SRV
+        query[pos++] = 0; query[pos++] = 1;   // QCLASS=IN
+
+        auto wrote = co_await Write(fd, query, pos);
+        if (!wrote || *wrote != pos) { co_await Close(fd); continue; }
+
+        uint8_t response[512] = {};
+        Read reader(fd, response, sizeof(response));
+        reader.with_timeout(per_server_timeout);
+        auto data = co_await reader;
+        co_await Close(fd);
+
+        if (!data || *data < 12) continue;
+
+        size_t rlen = *data;
+        detail::DnsHeader rhdr;
+        rhdr.decode(response);
+        uint16_t ancount = rhdr.ancount;
+        if (ancount == 0) continue;
+
+        size_t off = 12;
+        detail::decode_name(response, rlen, off);
+        off += 4; // skip QTYPE + QCLASS
+
+        for (uint16_t i = 0; i < ancount && off + 10 <= rlen; ++i) {
+            detail::decode_name(response, rlen, off);
+            if (off + 10 > rlen) break;
+            uint16_t rtype = static_cast<uint16_t>(response[off]) << 8 | response[off + 1];
+            off += 2; // type
+            off += 2; // class
+            off += 4; // ttl
+            uint16_t rdlen = static_cast<uint16_t>(response[off]) << 8 | response[off + 1];
+            off += 2;
+            if (off + rdlen > rlen) break;
+
+            if (rtype == 33 && rdlen >= 6) { // SRV
+                SrvRecord rec;
+                rec.priority = static_cast<uint16_t>(response[off]) << 8 | response[off + 1];
+                rec.weight   = static_cast<uint16_t>(response[off + 2]) << 8 | response[off + 3];
+                rec.port     = static_cast<uint16_t>(response[off + 4]) << 8 | response[off + 5];
+                size_t name_start = off + 6;
+                size_t name_off = name_start;
+                rec.target = detail::decode_name(response, rlen, name_off);
+                results.push_back(std::move(rec));
+            }
+            off += rdlen;
+        }
+
+        if (!results.empty()) break;
+    }
+
+    co_return results;
+}
+
 } // namespace ynet::async::io

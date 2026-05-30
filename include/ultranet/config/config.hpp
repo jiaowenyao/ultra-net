@@ -40,6 +40,16 @@ struct RetryConfig {
     double jitter_factor{0.2};
 };
 
+struct ServiceDiscoveryConfig {
+    std::chrono::milliseconds refresh_interval{30000};
+    std::chrono::milliseconds health_check_interval{10000};
+    std::chrono::milliseconds connect_timeout{5000};
+    size_t max_endpoints{32};
+    bool enable_health_checks{true};
+    size_t circuit_breaker_failures{3};
+    std::chrono::milliseconds circuit_breaker_timeout{30000};
+};
+
 struct UltraNetConfig {
     ynet::async::io::IoUringEngineConfig io_uring;
     PoolConfig pool;
@@ -47,6 +57,7 @@ struct UltraNetConfig {
     LogConfig log;
     CircuitBreakerConfig circuit_breaker;
     RetryConfig retry;
+    ServiceDiscoveryConfig service_discovery;
 
     static UltraNetConfig from_env() {
         UltraNetConfig c;
@@ -64,6 +75,10 @@ struct UltraNetConfig {
             c.circuit_breaker.failure_threshold = static_cast<size_t>(std::atoll(v));
         if (const char* v = std::getenv("ULTRANET_RETRY_MAX"))
             c.retry.max_retries = static_cast<size_t>(std::atoll(v));
+        if (const char* v = std::getenv("ULTRANET_SD_REFRESH_MS"))
+            c.service_discovery.refresh_interval = std::chrono::milliseconds(std::atoll(v));
+        if (const char* v = std::getenv("ULTRANET_SD_HEALTH_MS"))
+            c.service_discovery.health_check_interval = std::chrono::milliseconds(std::atoll(v));
         if (const char* v = std::getenv("ULTRANET_LOG_LEVEL")) {
             int lvl = std::atoi(v);
             if (lvl >= 0 && lvl <= 5) c.log.level = static_cast<log::Level>(lvl);

@@ -52,6 +52,8 @@
 #include "ultranet/net/tcp_socket.hpp"
 #include "ultranet/net/connection_pool.hpp"
 #include "ultranet/net/http.hpp"
+#include "ultranet/net/websocket.hpp"
+#include "ultranet/net/service_discovery.hpp"
 #include "ultranet/metrics/counter.hpp"
 #include "ultranet/metrics/gauge.hpp"
 #include "ultranet/metrics/histogram.hpp"
