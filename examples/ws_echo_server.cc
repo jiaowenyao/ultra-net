@@ -11,13 +11,11 @@ using namespace ynet::async::net;
 using namespace ynet::async::net::websocket;
 using namespace ynet::async::lifecycle;
 
-Task<WebSocketFrame> read_frame_with_timeout(WebSocket& ws);
-
 Task<void> ws_session(TcpSocket socket, ShutdownCoordinator& shutdown) {
     WebSocket ws(std::move(socket));
     char buf[4096];
     Read reader(ws.socket().fd(), buf, sizeof(buf));
-    reader.with_timeout(std::chrono::milliseconds(500));
+    reader.with_timeout(std::chrono::seconds(2));
 
     auto data = co_await reader;
     if (!data || *data == 0) co_return;
@@ -29,41 +27,16 @@ Task<void> ws_session(TcpSocket socket, ShutdownCoordinator& shutdown) {
     auto ec = co_await ws.accept(req);
     if (ec) { std::cerr << "ws accept failed: " << ec.message() << std::endl; co_return; }
 
+    // Echo loop: use zero-timeout read_frame for max throughput.
+    // Shutdown is checked between frames (connections drain quickly under load).
     while (!shutdown.is_shutdown()) {
-        auto frame = co_await read_frame_with_timeout(ws);
+        auto frame = co_await ws.read_frame();
         if (frame.opcode == OpCode::Close) {
             co_await ws.close();
             break;
         }
         if (frame.opcode == OpCode::Text || frame.opcode == OpCode::Binary) {
             co_await ws.write_frame(frame);
-        }
-    }
-}
-
-Task<WebSocketFrame> read_frame_with_timeout(WebSocket& ws) {
-    std::vector<uint8_t> buf;
-    while (true) {
-        size_t existing = buf.size();
-        buf.resize(existing + 8192);
-        auto r = co_await Read(ws.socket().fd(), buf.data() + existing, 8192)
-            .with_timeout(std::chrono::milliseconds(500));
-        if (!r) {
-            if (r.error().value() == ETIMEDOUT) continue;
-            throw std::system_error(r.error(), "ws read error");
-        }
-        if (*r == 0) throw std::system_error(make_io_error(ECONNRESET), "closed");
-        buf.resize(existing + *r);
-
-        size_t consumed = 0;
-        WebSocketFrame frame;
-        if (WebSocketFrame::decode(buf.data(), buf.size(), consumed, frame)) {
-            if (frame.opcode == OpCode::Ping) {
-                co_await ws.write_frame(WebSocketFrame::pong(frame.payload));
-                buf.erase(buf.begin(), buf.begin() + consumed);
-                continue;
-            }
-            co_return frame;
         }
     }
 }

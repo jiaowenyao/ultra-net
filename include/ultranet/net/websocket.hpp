@@ -128,25 +128,39 @@ struct WebSocketFrame {
     }
 
     std::vector<uint8_t> encode(bool apply_mask = false) const {
+        size_t len = payload.size();
+        size_t hdr_size = 2;
+        if (len >= 126 && len <= 65535) hdr_size = 4;
+        else if (len > 65535) hdr_size = 10;
+        if (apply_mask) hdr_size += 4;
+
         std::vector<uint8_t> result;
+        result.reserve(hdr_size + len);
+        encode_into_vec(result, apply_mask);
+        return result;
+    }
+
+    // Encode into pre-allocated vector (avoids double-buffering)
+    void encode_into_vec(std::vector<uint8_t>& out, bool apply_mask) const {
+        size_t len = payload.size();
+
         uint8_t b0 = static_cast<uint8_t>((fin ? 0x80 : 0) | static_cast<uint8_t>(opcode));
-        result.push_back(b0);
+        out.push_back(b0);
 
         uint8_t b1 = apply_mask ? 0x80 : 0;
-        size_t len = payload.size();
         if (len < 126) {
             b1 |= static_cast<uint8_t>(len);
-            result.push_back(b1);
+            out.push_back(b1);
         } else if (len <= 65535) {
             b1 |= 126;
-            result.push_back(b1);
-            result.push_back(static_cast<uint8_t>(len >> 8));
-            result.push_back(static_cast<uint8_t>(len & 0xFF));
+            out.push_back(b1);
+            out.push_back(static_cast<uint8_t>(len >> 8));
+            out.push_back(static_cast<uint8_t>(len & 0xFF));
         } else {
             b1 |= 127;
-            result.push_back(b1);
+            out.push_back(b1);
             for (int i = 7; i >= 0; --i)
-                result.push_back(static_cast<uint8_t>(len >> (i * 8)));
+                out.push_back(static_cast<uint8_t>(len >> (i * 8)));
         }
 
         if (apply_mask) {
@@ -155,16 +169,60 @@ struct WebSocketFrame {
                 std::random_device rd;
                 mk = static_cast<uint32_t>(rd()) ^ (static_cast<uint32_t>(rd()) << 16);
             }
-            result.push_back(static_cast<uint8_t>(mk >> 24));
-            result.push_back(static_cast<uint8_t>(mk >> 16));
-            result.push_back(static_cast<uint8_t>(mk >> 8));
-            result.push_back(static_cast<uint8_t>(mk));
-            for (size_t i = 0; i < payload.size(); ++i)
-                result.push_back(static_cast<uint8_t>(payload[i]) ^ static_cast<uint8_t>((mk >> (8 * (3 - (i % 4)))) & 0xFF));
+            out.push_back(static_cast<uint8_t>(mk >> 24));
+            out.push_back(static_cast<uint8_t>(mk >> 16));
+            out.push_back(static_cast<uint8_t>(mk >> 8));
+            out.push_back(static_cast<uint8_t>(mk));
+            for (size_t i = 0; i < len; ++i)
+                out.push_back(static_cast<uint8_t>(payload[i]) ^ static_cast<uint8_t>((mk >> (8 * (3 - (i % 4)))) & 0xFF));
         } else {
-            for (auto c : payload) result.push_back(static_cast<uint8_t>(c));
+            out.insert(out.end(), payload.begin(), payload.end());
         }
-        return result;
+    }
+
+    // Zero-allocation encode into caller-provided buffer.
+    // Returns number of bytes written, or 0 if buffer too small.
+    size_t encode_into(uint8_t* buf, size_t cap, bool apply_mask) const {
+        size_t len = payload.size();
+        size_t needed = 2 + len;
+        if (len >= 126 && len <= 65535) needed += 2;
+        else if (len > 65535) needed += 8;
+        if (apply_mask) needed += 4;
+        if (cap < needed) return 0;
+
+        uint8_t* p = buf;
+        *p++ = static_cast<uint8_t>((fin ? 0x80 : 0) | static_cast<uint8_t>(opcode));
+
+        uint8_t b1 = apply_mask ? 0x80 : 0;
+        if (len < 126) {
+            *p++ = b1 | static_cast<uint8_t>(len);
+        } else if (len <= 65535) {
+            *p++ = b1 | 126;
+            *p++ = static_cast<uint8_t>(len >> 8);
+            *p++ = static_cast<uint8_t>(len & 0xFF);
+        } else {
+            *p++ = b1 | 127;
+            for (int i = 7; i >= 0; --i)
+                *p++ = static_cast<uint8_t>(len >> (i * 8));
+        }
+
+        if (apply_mask) {
+            uint32_t mk = masking_key;
+            if (mk == 0) {
+                std::random_device rd;
+                mk = static_cast<uint32_t>(rd()) ^ (static_cast<uint32_t>(rd()) << 16);
+            }
+            *p++ = static_cast<uint8_t>(mk >> 24);
+            *p++ = static_cast<uint8_t>(mk >> 16);
+            *p++ = static_cast<uint8_t>(mk >> 8);
+            *p++ = static_cast<uint8_t>(mk);
+            for (size_t i = 0; i < len; ++i)
+                *p++ = static_cast<uint8_t>(payload[i]) ^ static_cast<uint8_t>((mk >> (8 * (3 - (i % 4)))) & 0xFF);
+        } else {
+            std::memcpy(p, payload.data(), len);
+            p += len;
+        }
+        return static_cast<size_t>(p - buf);
     }
 
     static bool decode(const uint8_t* data, size_t len, size_t& consumed, WebSocketFrame& frame) {
@@ -310,22 +368,32 @@ public:
     }
 
     Task<WebSocketFrame> read_frame() {
-        std::vector<uint8_t> buf;
+        uint8_t stack_buf[8192];
+        std::vector<uint8_t> heap_buf;
+        uint8_t* buf = stack_buf;
+        size_t cap = sizeof(stack_buf);
+        size_t total = 0;
+
         while (true) {
-            size_t existing = buf.size();
-            buf.resize(existing + 4096);
-            auto r = co_await m_socket.read(buf.data() + existing, 4096);
+            auto r = co_await m_socket.read(buf + total, cap - total);
             if (!r) throw std::system_error(r.error(), "websocket read failed");
             if (*r == 0) throw std::system_error(io::make_io_error(ECONNRESET), "websocket connection closed");
-            buf.resize(existing + *r);
+            total += *r;
 
             size_t consumed = 0;
             WebSocketFrame frame;
-            if (WebSocketFrame::decode(buf.data(), buf.size(), consumed, frame)) {
+            if (WebSocketFrame::decode(buf, total, consumed, frame)) {
                 if (frame.opcode == OpCode::Ping) {
                     auto pong = WebSocketFrame::pong(frame.payload);
                     co_await write_frame(pong);
-                    buf.erase(buf.begin(), buf.begin() + consumed);
+                    // Shift remaining data to front
+                    if (consumed < total) {
+                        size_t rem = total - consumed;
+                        std::memmove(buf, buf + consumed, rem);
+                        total = rem;
+                    } else {
+                        total = 0;
+                    }
                     continue;
                 }
                 if (frame.opcode == OpCode::Close) {
@@ -335,13 +403,34 @@ public:
                 }
                 co_return frame;
             }
+
+            // Frame incomplete: switch to heap if still on stack
+            if (buf == stack_buf) {
+                heap_buf.assign(stack_buf, stack_buf + total);
+                buf = heap_buf.data();
+                cap = heap_buf.size();
+            }
+            // Expand heap buffer
+            if (total >= cap) {
+                heap_buf.resize(cap + 4096);
+                buf = heap_buf.data();
+                cap = heap_buf.size();
+            }
         }
     }
 
     Task<void> write_frame(const WebSocketFrame& frame) {
-        auto encoded = frame.encode(m_masked);
+        // Zero-allocation path: encode into stack buffer
+        uint8_t stack_buf[16384];
+        size_t n = frame.encode_into(stack_buf, sizeof(stack_buf), m_masked);
+        if (n > 0) {
+            auto w = co_await m_socket.write(stack_buf, n);
+            if (!w) throw std::system_error(w.error(), "websocket write failed");
+            co_return;
+        }
 
-        // Build header + payload for Writev
+        // Fallback: large frames use heap
+        auto encoded = frame.encode(m_masked);
         size_t hdr_end = 2;
         uint64_t plen = frame.payload.size();
         if (plen >= 126 && plen <= 65535) hdr_end = 4;
