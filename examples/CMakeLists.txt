@@ -30,4 +30,32 @@ target_link_libraries(ws_echo_client ultranet pthread)
 add_executable(ws_stress_test ws_stress_test.cc)
 target_link_libraries(ws_stress_test ultranet pthread)
 
+# --- Documentation Examples (source in docs/examples/) ---
+# Each demonstrates a specific API usage pattern with detailed comments.
+
+# TCP echo server/client (docs examples)
+add_executable(tcp_echo_server ../docs/examples/tcp_echo_server.cc)
+target_link_libraries(tcp_echo_server ultranet pthread)
+
+add_executable(tcp_echo_client ../docs/examples/tcp_echo_client.cc)
+target_link_libraries(tcp_echo_client ultranet pthread)
+
+# UDP echo server/client (docs examples)
+add_executable(udp_echo_server ../docs/examples/udp_echo_server.cc)
+target_link_libraries(udp_echo_server ultranet pthread)
+
+add_executable(udp_echo_client ../docs/examples/udp_echo_client.cc)
+target_link_libraries(udp_echo_client ultranet pthread)
+
+# HTTP server (docs example)
+add_executable(http_server_example ../docs/examples/http_server.cc)
+target_link_libraries(http_server_example ultranet pthread)
+
+# WebSocket echo server/client (docs examples)
+add_executable(websocket_echo_server ../docs/examples/websocket_echo_server.cc)
+target_link_libraries(websocket_echo_server ultranet pthread)
+
+add_executable(websocket_echo_client ../docs/examples/websocket_echo_client.cc)
+target_link_libraries(websocket_echo_client ultranet pthread)
+
 message(STATUS "Examples configured")
