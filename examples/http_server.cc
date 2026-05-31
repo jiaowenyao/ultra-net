@@ -1,22 +1,13 @@
 // examples/http_server.cc - HTTP server using ultranet coroutines + io_uring
 #include "ultranet/ultranet.h"
 #include <iostream>
-#include <atomic>
 #include <cstring>
-#include <csignal>
-#include <errno.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
-#include <unistd.h>
 
 using namespace ynet::async;
 using namespace ynet::async::io;
-
-std::atomic<bool> g_running{true};
-
-void signal_handler(int) {
-    g_running = false;
-}
+using namespace ynet::async::lifecycle;
 
 const char* HTTP_RESPONSE =
     "HTTP/1.1 200 OK\r\n"
@@ -25,7 +16,7 @@ const char* HTTP_RESPONSE =
     "\r\n"
     "Hello, World!";
 
-Task<void> handle_http(int fd, scheduling::WorkStealingThreadPool& pool) {
+Task<void> handle_http(int fd) {
     char buf[4096];
 
     Read reader(fd, buf, sizeof(buf) - 1);
@@ -49,9 +40,7 @@ Task<void> handle_http(int fd, scheduling::WorkStealingThreadPool& pool) {
         while (written < resp_len) {
             Write writer(fd, HTTP_RESPONSE + written, resp_len - written);
             auto result = co_await writer;
-            if (!result) {
-                break;
-            }
+            if (!result) break;
             written += *result;
         }
     }
@@ -59,7 +48,7 @@ Task<void> handle_http(int fd, scheduling::WorkStealingThreadPool& pool) {
     co_await Close(fd);
 }
 
-Task<void> http_server(int port, scheduling::WorkStealingThreadPool& pool) {
+Task<void> http_server(int port, ShutdownCoordinator& shutdown) {
     auto sock = co_await Socket(AF_INET, SOCK_STREAM, 0);
     if (!sock) {
         std::cerr << "socket failed: " << sock.error().message() << std::endl;
@@ -92,7 +81,7 @@ Task<void> http_server(int port, scheduling::WorkStealingThreadPool& pool) {
 
     std::cout << "HTTP server listening on port " << port << std::endl;
 
-    while (g_running) {
+    while (!shutdown.is_shutdown()) {
         Accept acceptor(listen_fd);
         acceptor.with_timeout(std::chrono::milliseconds(500));
         auto client = co_await acceptor;
@@ -106,7 +95,8 @@ Task<void> http_server(int port, scheduling::WorkStealingThreadPool& pool) {
             continue;
         }
 
-        pool.submit(handle_http(*client, pool).release());
+        auto* sched = ExecutionContext::current();
+        if (sched) sched->submit(handle_http(*client).release());
     }
 
     co_await Close(listen_fd);
@@ -115,23 +105,11 @@ Task<void> http_server(int port, scheduling::WorkStealingThreadPool& pool) {
 
 int main(int argc, char* argv[]) {
     int port = (argc > 1) ? std::atoi(argv[1]) : 8080;
-
-    std::signal(SIGINT, signal_handler);
-    std::signal(SIGTERM, signal_handler);
     std::signal(SIGPIPE, SIG_IGN);
 
-    try {
-        scheduling::WorkStealingThreadPool pool(2);
-        ExecutionContext::Scope scope(&pool);
-
-        auto server_task = http_server(port, pool);
-        pool.submit(server_task.release());
-
-        pool.wait_all();
-    } catch (const std::exception& e) {
-        std::cerr << "Fatal error: " << e.what() << std::endl;
-        return 1;
-    }
-
-    return 0;
+    return Launcher()
+        .threads(2)
+        .run([port](ShutdownCoordinator& shutdown) -> Task<void> {
+            co_await http_server(port, shutdown);
+        });
 }

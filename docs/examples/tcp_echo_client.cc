@@ -87,16 +87,9 @@ int main(int argc, char* argv[]) {
     int port = (argc > 2) ? std::atoi(argv[2]) : 8080;
     std::string message = (argc > 3) ? argv[3] : "Hello, ultra-net!";
 
-    try {
-        // Single-threaded pool is sufficient for a simple client
-        scheduling::WorkStealingThreadPool pool(1);
-        ExecutionContext::Scope scope(&pool);
-        pool.submit(tcp_client(host, port, message).release());
-        pool.wait_all();
-    } catch (const std::exception& e) {
-        std::cerr << "Fatal error: " << e.what() << std::endl;
-        return 1;
-    }
-
-    return 0;
+    // launch() is the simplest entry point: it creates a pool, binds it,
+    // runs the coroutine, and blocks until complete.
+    return launch([&]() -> Task<void> {
+        co_await tcp_client(host, port, message);
+    });
 }

@@ -70,15 +70,17 @@ Task<void> server(int port, ShutdownCoordinator& shutdown) {
 }
 
 int main() {
-    ShutdownCoordinator shutdown;
-    shutdown.install_signal_handlers();
-
-    scheduling::WorkStealingThreadPool pool(2);
-    ExecutionContext::Scope scope(&pool);
-    pool.submit(server(8080, shutdown).release());
-    pool.wait_all();
+    return Launcher()
+        .threads(2)
+        .run([](lifecycle::ShutdownCoordinator& shutdown) -> Task<void> {
+            co_await server(8080, shutdown);
+        });
 }
 ```
+
+Launcher 内部封装了 `ShutdownCoordinator` + `WorkStealingThreadPool` + `ExecutionContext::Scope`
+的创建和生命周期管理。`.threads(2)` 设置 2 个 worker 线程，`.run()` 接受一个返回 `Task<void>` 的 lambda，
+lambda 接收 `ShutdownCoordinator&` 用于在 accept 循环中检查关闭信号。
 
 ### 关键 API
 
@@ -182,13 +184,16 @@ if (*n == 0) {
 
 ### 优雅关闭
 
-使用 `ShutdownCoordinator` 实现信号驱动的优雅关闭：
+`Launcher` 内置了 `ShutdownCoordinator`，自动注册 SIGINT/SIGTERM 信号处理：
 
 ```cpp
-ShutdownCoordinator shutdown;
-shutdown.install_signal_handlers(); // 注册 SIGINT/SIGTERM
+// Launcher 自动处理:
+// 1. 创建 ShutdownCoordinator → install_signal_handlers()
+// 2. 创建 WorkStealingThreadPool → ExecutionContext::Scope
+// 3. 调用 lambda, 传入 ShutdownCoordinator&
+// 4. pool.wait_all() 阻塞直到所有任务完成
 
-// 在 accept 循环中检查
+// accept 循环中检查:
 while (!shutdown.is_shutdown()) {
     // accept with timeout → 最多 500ms 后检查标志
 }
@@ -197,7 +202,7 @@ while (!shutdown.is_shutdown()) {
 // 1. SIGINT → shutdown.is_shutdown() == true
 // 2. Accept 超时 → 退出循环 → Close(listen_fd)
 // 3. 活跃的客户端 handler 自然完成
-// 4. pool.wait_all() 在 active_tasks == 0 时返回
+// 4. Launcher::run() 返回 0
 ```
 
 ## TCP 客户端

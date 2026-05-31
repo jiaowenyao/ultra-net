@@ -77,15 +77,7 @@ int main(int argc, char* argv[]) {
     int port = (argc > 2) ? std::atoi(argv[2]) : 8081;
     std::string message = (argc > 3) ? argv[3] : "Hello, UDP!";
 
-    try {
-        scheduling::WorkStealingThreadPool pool(1);
-        ExecutionContext::Scope scope(&pool);
-        pool.submit(udp_client(host, port, message).release());
-        pool.wait_all();
-    } catch (const std::exception& e) {
-        std::cerr << "Fatal error: " << e.what() << std::endl;
-        return 1;
-    }
-
-    return 0;
+    return launch([&]() -> Task<void> {
+        co_await udp_client(host, port, message);
+    });
 }

@@ -64,18 +64,7 @@ int main(int argc, char* argv[]) {
 
     std::signal(SIGPIPE, SIG_IGN);
 
-    try {
-        scheduling::WorkStealingThreadPool pool(1);
-        ExecutionContext::Scope scope(&pool);
-
-        auto client_task = echo_client(host, port);
-        pool.submit(client_task.release());
-
-        pool.wait_all();
-    } catch (const std::exception& e) {
-        std::cerr << "Fatal error: " << e.what() << std::endl;
-        return 1;
-    }
-
-    return 0;
+    return launch([=]() -> Task<void> {
+        co_await echo_client(host, port);
+    });
 }

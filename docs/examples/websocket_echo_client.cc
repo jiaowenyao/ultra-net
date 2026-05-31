@@ -72,15 +72,7 @@ int main(int argc, char* argv[]) {
     int port = (argc > 2) ? std::atoi(argv[2]) : 9001;
     std::string message = (argc > 3) ? argv[3] : "Hello, WebSocket!";
 
-    try {
-        scheduling::WorkStealingThreadPool pool(1);
-        ExecutionContext::Scope scope(&pool);
-        pool.submit(ws_client(host, port, message).release());
-        pool.wait_all();
-    } catch (const std::exception& e) {
-        std::cerr << "Fatal error: " << e.what() << std::endl;
-        return 1;
-    }
-
-    return 0;
+    return launch([&]() -> Task<void> {
+        co_await ws_client(host, port, message);
+    });
 }

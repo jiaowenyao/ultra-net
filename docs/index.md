@@ -60,11 +60,11 @@ Task<void> echo(int fd) {
 }
 
 int main() {
-    scheduling::WorkStealingThreadPool pool(2);
-    ExecutionContext::Scope scope(&pool);
-    // ... setup socket, bind, listen, accept ...
-    pool.submit(echo(client_fd).release());
-    pool.wait_all();
+    return launch([](ShutdownCoordinator& shutdown) -> Task<void> {
+        // ... setup socket, bind, listen, accept ...
+        auto* sched = ExecutionContext::current();
+        if (sched) sched->submit(echo(client_fd).release());
+    });
 }
 ```
 

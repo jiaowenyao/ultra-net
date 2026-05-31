@@ -137,18 +137,9 @@ Task<void> ws_server(int port, ShutdownCoordinator& shutdown) {
 int main(int argc, char* argv[]) {
     int port = (argc > 1) ? std::atoi(argv[1]) : 9001;
 
-    ShutdownCoordinator shutdown;
-    shutdown.install_signal_handlers();
-
-    try {
-        scheduling::WorkStealingThreadPool pool(2);
-        ExecutionContext::Scope scope(&pool);
-        pool.submit(ws_server(port, shutdown).release());
-        pool.wait_all();
-    } catch (const std::exception& e) {
-        std::cerr << "Fatal: " << e.what() << std::endl;
-        return 1;
-    }
-
-    return 0;
+    return Launcher()
+        .threads(2)
+        .run([port](lifecycle::ShutdownCoordinator& shutdown) -> Task<void> {
+            co_await ws_server(port, shutdown);
+        });
 }

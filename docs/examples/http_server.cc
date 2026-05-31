@@ -141,18 +141,9 @@ Task<void> http_server_main(int port, ShutdownCoordinator& shutdown) {
 int main(int argc, char* argv[]) {
     int port = (argc > 1) ? std::atoi(argv[1]) : 8080;
 
-    ShutdownCoordinator shutdown;
-    shutdown.install_signal_handlers();
-
-    try {
-        scheduling::WorkStealingThreadPool pool(2);
-        ExecutionContext::Scope scope(&pool);
-        pool.submit(http_server_main(port, shutdown).release());
-        pool.wait_all();
-    } catch (const std::exception& e) {
-        std::cerr << "Fatal error: " << e.what() << std::endl;
-        return 1;
-    }
-
-    return 0;
+    return Launcher()
+        .threads(2)
+        .run([port](lifecycle::ShutdownCoordinator& shutdown) -> Task<void> {
+            co_await http_server_main(port, shutdown);
+        });
 }

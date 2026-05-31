@@ -125,34 +125,22 @@ Task<void> tcp_echo_server(int port, ShutdownCoordinator& shutdown) {
 int main(int argc, char* argv[]) {
     int port = (argc > 1) ? std::atoi(argv[1]) : 8080;
 
-    // ShutdownCoordinator registers SIGINT/SIGTERM handlers.
+    // Launcher encapsulates the boilerplate:
+    //   ShutdownCoordinator (signal handling)
+    //   + WorkStealingThreadPool (async I/O workers)
+    //   + ExecutionContext::Scope (bind pool to main thread)
+    //   + submit + release (launch the server coroutine)
+    //   + wait_all (block until graceful shutdown)
+    //
     // When the user presses Ctrl+C:
     //   1. Signal handler fires → shutdown.is_shutdown() becomes true
     //   2. Accept loop's next timeout (≤500ms) returns ETIMEDOUT
     //   3. Loop breaks, listen_fd is closed
     //   4. Active sessions drain naturally
-    //   5. pool.wait_all() returns when active_tasks reaches zero
-    ShutdownCoordinator shutdown;
-    shutdown.install_signal_handlers();
-
-    try {
-        // Create a thread pool with 2 worker threads.
-        // Each worker runs an io_uring instance for async I/O.
-        scheduling::WorkStealingThreadPool pool(2);
-
-        // ExecutionContext::Scope binds the pool to the current thread.
-        // In this scope, co_await on a Task will submit to the pool.
-        ExecutionContext::Scope scope(&pool);
-
-        // Submit the server coroutine to the pool and release ownership
-        pool.submit(tcp_echo_server(port, shutdown).release());
-
-        // Block until all tasks complete (signal-triggered shutdown)
-        pool.wait_all();
-    } catch (const std::exception& e) {
-        std::cerr << "Fatal error: " << e.what() << std::endl;
-        return 1;
-    }
-
-    return 0;
+    //   5. wait_all returns when active_tasks reaches zero
+    return Launcher()
+        .threads(2)
+        .run([port](lifecycle::ShutdownCoordinator& shutdown) -> Task<void> {
+            co_await tcp_echo_server(port, shutdown);
+        });
 }

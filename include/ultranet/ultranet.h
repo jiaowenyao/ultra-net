@@ -44,6 +44,7 @@
 #include "ultranet/net/shutdown.hpp"
 #include "ultranet/net/dns.hpp"
 #include "ultranet/coroutine/when_all.hpp"
+#include "ultranet/coroutine/launcher.hpp"
 #include "ultranet/coroutine/circuit_breaker.hpp"
 #include "ultranet/coroutine/retry.hpp"
 #include "ultranet/lifecycle/shutdown.hpp"

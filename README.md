@@ -103,13 +103,11 @@ Task<void> server(int port, ShutdownCoordinator& shutdown) {
 }
 
 int main() {
-    ShutdownCoordinator shutdown;
-    shutdown.install_signal_handlers();
-
-    scheduling::WorkStealingThreadPool pool(2);
-    ExecutionContext::Scope scope(&pool);
-    pool.submit(server(8080, shutdown).release());
-    pool.wait_all();
+    return Launcher()
+        .threads(2)
+        .run([port](lifecycle::ShutdownCoordinator& shutdown) -> Task<void> {
+            co_await server(8080, shutdown);
+        });
 }
 ```
 

@@ -77,18 +77,9 @@ Task<void> udp_echo_server(int port, ShutdownCoordinator& shutdown) {
 int main(int argc, char* argv[]) {
     int port = (argc > 1) ? std::atoi(argv[1]) : 8081;
 
-    ShutdownCoordinator shutdown;
-    shutdown.install_signal_handlers();
-
-    try {
-        scheduling::WorkStealingThreadPool pool(2);
-        ExecutionContext::Scope scope(&pool);
-        pool.submit(udp_echo_server(port, shutdown).release());
-        pool.wait_all();
-    } catch (const std::exception& e) {
-        std::cerr << "Fatal error: " << e.what() << std::endl;
-        return 1;
-    }
-
-    return 0;
+    return Launcher()
+        .threads(2)
+        .run([port](lifecycle::ShutdownCoordinator& shutdown) -> Task<void> {
+            co_await udp_echo_server(port, shutdown);
+        });
 }

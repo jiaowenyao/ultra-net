@@ -1,27 +1,18 @@
 // examples/echo_server.cc - Echo server using ultranet coroutines + io_uring
 #include "ultranet/ultranet.h"
 #include <iostream>
-#include <atomic>
 #include <cstring>
-#include <csignal>
-#include <errno.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
-#include <unistd.h>
 
 using namespace ynet::async;
 using namespace ynet::async::io;
+using namespace ynet::async::lifecycle;
 
-std::atomic<bool> g_running{true};
-
-void signal_handler(int) {
-    g_running = false;
-}
-
-Task<void> echo_session(int fd, scheduling::WorkStealingThreadPool& pool) {
+Task<void> echo_session(int fd, ShutdownCoordinator& shutdown) {
     char buf[4096];
 
-    while (g_running) {
+    while (!shutdown.is_shutdown()) {
         Read reader(fd, buf, sizeof(buf));
         reader.with_timeout(std::chrono::milliseconds(500));
         auto data = co_await reader;
@@ -35,9 +26,7 @@ Task<void> echo_session(int fd, scheduling::WorkStealingThreadPool& pool) {
         }
 
         size_t n = *data;
-        if (n == 0) {
-            break;
-        }
+        if (n == 0) break;
 
         size_t written = 0;
         while (written < n) {
@@ -55,7 +44,7 @@ Task<void> echo_session(int fd, scheduling::WorkStealingThreadPool& pool) {
     co_await Close(fd);
 }
 
-Task<void> echo_server(int port, scheduling::WorkStealingThreadPool& pool) {
+Task<void> echo_server(int port, ShutdownCoordinator& shutdown) {
     auto sock = co_await Socket(AF_INET, SOCK_STREAM, 0);
     if (!sock) {
         std::cerr << "socket failed: " << sock.error().message() << std::endl;
@@ -88,7 +77,7 @@ Task<void> echo_server(int port, scheduling::WorkStealingThreadPool& pool) {
 
     std::cout << "Echo server listening on port " << port << std::endl;
 
-    while (g_running) {
+    while (!shutdown.is_shutdown()) {
         Accept acceptor(listen_fd);
         acceptor.with_timeout(std::chrono::milliseconds(500));
         auto client = co_await acceptor;
@@ -105,7 +94,8 @@ Task<void> echo_server(int port, scheduling::WorkStealingThreadPool& pool) {
         int client_fd = *client;
         std::cout << "Accepted connection: fd=" << client_fd << std::endl;
 
-        pool.submit(echo_session(client_fd, pool).release());
+        auto* sched = ExecutionContext::current();
+        if (sched) sched->submit(echo_session(client_fd, shutdown).release());
     }
 
     co_await Close(listen_fd);
@@ -114,23 +104,11 @@ Task<void> echo_server(int port, scheduling::WorkStealingThreadPool& pool) {
 
 int main(int argc, char* argv[]) {
     int port = (argc > 1) ? std::atoi(argv[1]) : 8080;
-
-    std::signal(SIGINT, signal_handler);
-    std::signal(SIGTERM, signal_handler);
     std::signal(SIGPIPE, SIG_IGN);
 
-    try {
-        scheduling::WorkStealingThreadPool pool(2);
-        ExecutionContext::Scope scope(&pool);
-
-        auto server_task = echo_server(port, pool);
-        pool.submit(server_task.release());
-
-        pool.wait_all();
-    } catch (const std::exception& e) {
-        std::cerr << "Fatal error: " << e.what() << std::endl;
-        return 1;
-    }
-
-    return 0;
+    return Launcher()
+        .threads(2)
+        .run([port](ShutdownCoordinator& shutdown) -> Task<void> {
+            co_await echo_server(port, shutdown);
+        });
 }

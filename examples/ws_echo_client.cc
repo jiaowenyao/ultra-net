@@ -30,14 +30,7 @@ int main(int argc, char* argv[]) {
 
     std::signal(SIGPIPE, SIG_IGN);
 
-    try {
-        scheduling::WorkStealingThreadPool pool(1);
-        ExecutionContext::Scope scope(&pool);
-        pool.submit(ws_echo_client(host, port).release());
-        pool.wait_all();
-    } catch (const std::exception& e) {
-        std::cerr << "Error: " << e.what() << std::endl;
-        return 1;
-    }
-    return 0;
+    return launch([&]() -> Task<void> {
+        co_await ws_echo_client(host, port);
+    });
 }
