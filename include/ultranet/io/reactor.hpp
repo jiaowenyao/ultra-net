@@ -11,8 +11,9 @@ class IoReactor {
 public:
     using CompletionHandler = void (*)(void* ctx, io_uring_cqe* cqe);
 
-    IoReactor(int event_fd, CompletionHandler on_completion, void* ctx)
-        : m_engine_scope()
+    IoReactor(int event_fd, CompletionHandler on_completion, void* ctx,
+              IoUringEngineConfig config = IoUringEngineConfig{})
+        : m_engine_scope(config)
         , m_event_fd(event_fd)
         , m_on_completion(on_completion)
         , m_ctx(ctx) {

@@ -250,8 +250,10 @@ struct HttpResponse {
 
     bool is_keepalive() const {
         auto v = header("connection");
-        for (auto& c : std::string(v)) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-        return v.find("keep-alive") != std::string::npos;
+        std::string lowered(v);
+        for (auto& c : lowered)
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        return lowered.find("keep-alive") != std::string::npos;
     }
 };
 

@@ -235,6 +235,9 @@ if(ULTRANET_BUILD_EXAMPLES)
     add_subdirectory(examples)
 endif()
 
+# Application projects
+add_subdirectory(app)
+
 # Print configuration summary
 message(STATUS "")
 message(STATUS "ultranet ${PROJECT_VERSION}")

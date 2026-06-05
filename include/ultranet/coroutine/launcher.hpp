@@ -41,6 +41,12 @@ public:
         return *this;
     }
 
+    // Set io_uring engine configuration.
+    Launcher& io_uring_config(const io::IoUringEngineConfig& cfg) noexcept {
+        m_io_config = cfg;
+        return *this;
+    }
+
     // Run a server function that participates in graceful shutdown.
     // The callable receives a ShutdownCoordinator& for checking is_shutdown()
     // in accept/processing loops.
@@ -50,7 +56,7 @@ public:
         lifecycle::ShutdownCoordinator shutdown;
         shutdown.install_signal_handlers();
         try {
-            scheduling::WorkStealingThreadPool pool(m_threads);
+            scheduling::WorkStealingThreadPool pool(m_threads, m_io_config);
             ExecutionContext::Scope scope(&pool);
             pool.submit(fn(shutdown).release());
             pool.wait_all();
@@ -71,7 +77,7 @@ public:
         lifecycle::ShutdownCoordinator shutdown;
         shutdown.install_signal_handlers();
         try {
-            scheduling::WorkStealingThreadPool pool(m_threads);
+            scheduling::WorkStealingThreadPool pool(m_threads, m_io_config);
             ExecutionContext::Scope scope(&pool);
             pool.submit(fn().release());
             pool.wait_all();
@@ -84,6 +90,7 @@ public:
 
 private:
     size_t m_threads = std::thread::hardware_concurrency();
+    io::IoUringEngineConfig m_io_config{};
 };
 
 // Zero-configuration entry point.  Equivalent to Launcher().run(fn).

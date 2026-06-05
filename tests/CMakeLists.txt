@@ -45,6 +45,7 @@ set(TEST_SOURCES
     websocket_test.cc
     dns_srv_test.cc
     service_discovery_test.cc
+    proxy_test.cc
 )
 
 foreach(test_src ${TEST_SOURCES})

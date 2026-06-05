@@ -19,9 +19,11 @@ namespace ynet::async::scheduling {
 
 class WorkStealingThreadPool final : public Scheduler {
 public:
-    explicit WorkStealingThreadPool(size_t num_threads = std::thread::hardware_concurrency())
+    explicit WorkStealingThreadPool(size_t num_threads = std::thread::hardware_concurrency(),
+                                    io::IoUringEngineConfig io_config = io::IoUringEngineConfig{})
         : m_stop(false)
-        , m_active_tasks(0) {
+        , m_active_tasks(0)
+        , m_io_config(io_config) {
 
         if (num_threads == 0) {
             num_threads = 1;
@@ -299,7 +301,8 @@ private:
         t_thread_local_state.worker_id = worker_id;
 
         ExecutionContext::Scope context_scope(this);
-        io::IoReactor reactor(m_event_fd, &WorkStealingThreadPool::on_io_completion, this);
+        io::IoReactor reactor(m_event_fd, &WorkStealingThreadPool::on_io_completion,
+                                this, m_io_config);
 
         while (!m_stop.load(std::memory_order_acquire)) {
             reactor.poll();
@@ -329,6 +332,7 @@ private:
     std::atomic<size_t> m_active_tasks;
     Stats m_stats{};
     int m_event_fd{-1};
+    io::IoUringEngineConfig m_io_config{};
 
     struct ThreadLocalState {
         WorkStealingThreadPool* pool = nullptr;

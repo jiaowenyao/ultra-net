@@ -13,7 +13,7 @@
 #include <chrono>
 #include <unistd.h>
 #include <netinet/in.h>
-#include <arpa/inet.h>
+#include <netinet/tcp.h>
 #include <arpa/inet.h>
 
 namespace ynet::async::net {
@@ -99,6 +99,9 @@ inline ynet::async::Task<TcpSocket> TcpSocket::connect(
             co_await io::Close(fd);
             continue;
         }
+
+        int opt = 1;
+        setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &opt, sizeof(opt));
 
         co_return TcpSocket(fd);
     }

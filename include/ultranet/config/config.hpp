@@ -67,10 +67,14 @@ struct UltraNetConfig {
             c.io_uring.entries = static_cast<size_t>(std::atoll(v));
         if (const char* v = std::getenv("ULTRANET_MAX_PENDING_OPS"))
             c.io_uring.max_pending_ops = static_cast<size_t>(std::atoll(v));
+        if (const char* v = std::getenv("ULTRANET_IO_BATCH_THRESHOLD"))
+            c.io_uring.batch_threshold = static_cast<size_t>(std::atoll(v));
         if (const char* v = std::getenv("ULTRANET_CONN_POOL_MIN"))
             c.connection_pool.min_connections = static_cast<size_t>(std::atoll(v));
         if (const char* v = std::getenv("ULTRANET_CONN_POOL_MAX"))
             c.connection_pool.max_connections = static_cast<size_t>(std::atoll(v));
+        if (const char* v = std::getenv("ULTRANET_CONN_POOL_CONNECT_TIMEOUT"))
+            c.connection_pool.connect_timeout = std::chrono::milliseconds(std::atoll(v));
         if (const char* v = std::getenv("ULTRANET_CB_THRESHOLD"))
             c.circuit_breaker.failure_threshold = static_cast<size_t>(std::atoll(v));
         if (const char* v = std::getenv("ULTRANET_RETRY_MAX"))
