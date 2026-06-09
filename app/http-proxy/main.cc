@@ -38,6 +38,17 @@ using namespace ynet::async::io;
 using namespace ynet::async::net;
 using namespace ynet::async::lifecycle;
 
+// Built-in profiler (zero-overhead when not reporting).
+#include "../../.claude/bench/profiler.hpp"
+static int G_forward   = PROFILE_REGISTER("forward_one");
+static int G_client_rd = PROFILE_REGISTER("client_read");
+static int G_backend_wr= PROFILE_REGISTER("backend_write");
+static int G_backend_rd= PROFILE_REGISTER("backend_read");
+static int G_client_wr = PROFILE_REGISTER("client_write");
+static int G_acquire   = PROFILE_REGISTER("pool_acquire");
+static int G_enobufs   = PROFILE_REGISTER("enobufs_retry");
+static int G_backoff   = PROFILE_REGISTER("backoff_gate_us");
+
 namespace {
 
 // Reduced for low-resource servers (was 256KB).
@@ -220,7 +231,8 @@ public:
     Task<bool> acquire(ConnectionPool& pool) {
         if (m_socket.is_valid()) co_return true;
         try {
-            m_socket = co_await pool.acquire();
+            { PROFILE_SCOPE(G_acquire);
+            m_socket = co_await pool.acquire(); }
             m_pool = &pool;
             m_invalid = false;
             co_return true;
@@ -455,6 +467,7 @@ Task<void> proxy_session(int client_fd, ConnectionPool& pool,
 
     auto forward_one = [&](PooledConnection& conn,
                            size_t total_req) -> Task<bool> {
+        PROFILE_SCOPE(G_forward);
         size_t written = 0;
         const uint8_t* req_data = client_buf.head();
 
@@ -815,6 +828,9 @@ Task<void> proxy_server(int listen_port, const std::string& backend_host,
     auto backoff = BACKOFF_MIN;
 
     while (!shutdown.is_shutdown()) {
+        profiler_report();
+        // Track ENOBUFS backoff pressure
+        profiler_record(G_backoff, (uint64_t)backoff_gate.current_backoff_us() * 1000);
         auto* engine = IoUringEngine::current();
 
         if (engine && engine->has_cq_overflow()) {

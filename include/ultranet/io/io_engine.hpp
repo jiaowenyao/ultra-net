@@ -168,6 +168,25 @@ public:
         return count;
     }
 
+    // Process at most `max_cqes` CQEs, leaving the rest for the next poll.
+    // Used by two-level CQE processing to interleave with coroutine execution.
+    template <typename Handler>
+    size_t for_each_cqe_n(size_t max_cqes, Handler&& handler) {
+        if (max_cqes == 0) return for_each_cqe(std::forward<Handler>(handler));
+        io_uring_cqe* cqe;
+        unsigned head;
+        size_t count = 0;
+        io_uring_for_each_cqe(&m_ring, head, cqe) {
+            if (count >= max_cqes) break;
+            ++count;
+            std::forward<Handler>(handler)(cqe);
+        }
+        if (count > 0) {
+            io_uring_cq_advance(&m_ring, count);
+        }
+        return count;
+    }
+
     io_uring* get_ring() noexcept { return &m_ring; }
     bool is_valid() const noexcept { return m_ring.ring_fd >= 0; }
 
