@@ -97,8 +97,7 @@ public:
 
     struct Stats {
         size_t total_successes{0};
-        size_t total_failures{0};
-        size_t consecutive_failures{0};
+        size_t failure_count{0};
         size_t fast_fails{0};
         size_t half_open_attempts{0};
     };
@@ -106,7 +105,6 @@ public:
     Stats snapshot() const noexcept {
         return {
             m_success_count.load(std::memory_order_relaxed),
-            m_failure_count.load(std::memory_order_relaxed),
             m_failure_count.load(std::memory_order_relaxed),
             m_fast_fail_count.load(std::memory_order_relaxed),
             m_half_open_attempts.load(std::memory_order_relaxed)

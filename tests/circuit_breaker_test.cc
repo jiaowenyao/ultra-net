@@ -108,7 +108,7 @@ void test_stats() {
     cb.on_failure();
     auto s = cb.snapshot();
     CHECK(s.total_successes == 1, "success count");
-    CHECK(s.total_failures == 1, "failure count");
+    CHECK(s.failure_count == 1, "failure count");
     PASS();
 }
 

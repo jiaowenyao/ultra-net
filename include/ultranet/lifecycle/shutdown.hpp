@@ -20,15 +20,15 @@ public:
 
     ~ShutdownCoordinator() {
         shutdown();
+        unregister_instance();
         if (m_signals_installed) {
             std::signal(SIGINT, SIG_DFL);
             std::signal(SIGTERM, SIG_DFL);
         }
-        s_instance.store(nullptr, std::memory_order_release);
     }
 
     void install_signal_handlers() {
-        s_instance.store(this, std::memory_order_release);
+        register_instance();
         std::signal(SIGINT, signal_handler);
         std::signal(SIGTERM, signal_handler);
         m_signals_installed = true;
@@ -40,7 +40,6 @@ public:
                 std::memory_order_acq_rel)) {
             m_signal.close();
         }
-        // If already Draining or Complete, idempotent
     }
 
     bool is_shutdown() const noexcept {
@@ -61,11 +60,39 @@ private:
     Channel<bool, 1> m_signal;
     std::atomic<ShutdownPhase> m_phase{ShutdownPhase::Running};
     bool m_signals_installed{false};
-    static inline std::atomic<ShutdownCoordinator*> s_instance{nullptr};
+
+    // Intrusive linked list for safe multi-instance signal handling.
+    ShutdownCoordinator* m_next{nullptr};
+    static inline std::atomic<ShutdownCoordinator*> s_head{nullptr};
+
+    void register_instance() noexcept {
+        m_next = s_head.load(std::memory_order_acquire);
+        while (!s_head.compare_exchange_weak(m_next, this,
+                std::memory_order_release, std::memory_order_relaxed)) {}
+    }
+
+    void unregister_instance() noexcept {
+        auto* cur = s_head.load(std::memory_order_acquire);
+        ShutdownCoordinator* prev = nullptr;
+        while (cur) {
+            if (cur == this) {
+                auto* next = cur->m_next;
+                if (prev) {
+                    prev->m_next = next;
+                } else {
+                    s_head.store(next, std::memory_order_release);
+                }
+                return;
+            }
+            prev = cur;
+            cur = cur->m_next;
+        }
+    }
 
     static void signal_handler(int) {
-        if (auto* coord = s_instance.load(std::memory_order_acquire)) {
-            coord->shutdown();
+        for (auto* cur = s_head.load(std::memory_order_acquire);
+             cur; cur = cur->m_next) {
+            cur->shutdown();
         }
     }
 };

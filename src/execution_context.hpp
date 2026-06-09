@@ -28,12 +28,11 @@ public:
             set_current_scheduler(m_previous);
         }
 
-        // 禁止拷贝
+        // 禁止拷贝和移动（Scope 是纯粹的 RAII 守卫）
         Scope(const Scope&) = delete;
         Scope& operator=(const Scope&) = delete;
-
-        // 允许移动
-        Scope(Scope&& other) noexcept;
+        Scope(Scope&& other) = delete;
+        Scope& operator=(Scope&& other) = delete;
     private:
         Scheduler* m_previous;
     };

@@ -44,7 +44,11 @@ BufferGroup::BufferGroup(unsigned gid, size_t entries, size_t buf_size)
     };
 
     // 5. 注册到io_uring
-    auto* ring = IoUringEngine::current()->get_ring();
+    auto* engine = IoUringEngine::current();
+    if (!engine) {
+        throw std::logic_error("BufferGroup requires an active IoUringEngine");
+    }
+    auto* ring = engine->get_ring();
     int ret = io_uring_register_buf_ring(ring, &m_reg, 0);
     if (ret < 0) {
         throw std::system_error(-ret, std::system_category(),

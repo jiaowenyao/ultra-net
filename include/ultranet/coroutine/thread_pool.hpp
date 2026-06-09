@@ -151,6 +151,25 @@ public:
         enqueue_task(std::move(task));
     }
 
+    // Pin a coroutine to a specific worker thread (bypasses work-stealing).
+    // The coroutine always executes on thread `worker_id`, keeping its
+    // io_uring operations local to that thread's ring.
+    void submit_on_thread(size_t worker_id, std::coroutine_handle<> handle) {
+        if (!handle || handle.done()) return;
+        auto typed = std::coroutine_handle<TaskPromiseBase>::from_address(handle.address());
+        auto& promise = typed.promise();
+        promise.m_notify_fn = &WorkStealingThreadPool::on_task_complete;
+        promise.m_notify_ctx = this;
+        increment_tasks();
+        UnifiedTask task(handle);
+        if (worker_id < m_mpsc_queues.size()) {
+            while (!m_mpsc_queues[worker_id]->try_push(std::move(task))) {}
+            wake_workers();
+        } else {
+            enqueue_task(std::move(task));
+        }
+    }
+
     static void on_task_complete(void* ctx) noexcept {
         static_cast<WorkStealingThreadPool*>(ctx)->decrement_tasks();
     }
@@ -227,6 +246,9 @@ public:
 
     void record_submit() noexcept { m_stats.submitted_ops.fetch_add(1, std::memory_order_relaxed); }
     void record_completion() noexcept { m_stats.completed_ops.fetch_add(1, std::memory_order_relaxed); }
+    void record_completions(size_t count) noexcept {
+        m_stats.completed_ops.fetch_add(count, std::memory_order_relaxed);
+    }
 
 private:
     struct Stats {
@@ -248,17 +270,14 @@ private:
 
     bool try_steal_task(size_t thief_id, std::optional<UnifiedTask>& task) {
         size_t num = m_workers.size();
-        if (num <= 1) {
-            return false;
-        }
+        if (num <= 1) return false;
+
         static thread_local std::mt19937 rng(std::random_device{}());
         std::uniform_int_distribution<size_t> dist(0, num - 1);
         size_t start = dist(rng);
         for (size_t i = 0; i < num; ++i) {
             size_t victim = (start + i) % num;
-            if (victim == thief_id) {
-                continue;
-            }
+            if (victim == thief_id) continue;
             if (auto t = m_local_queues[victim]->steal()) {
                 task = std::move(*t);
                 return true;
@@ -283,13 +302,6 @@ private:
         // Multishot: one SQE → many CQEs. Dispatch to custom handler,
         // do NOT touch m_result/m_completed/pending_ops.
         if (callback->m_is_multishot) {
-            static std::atomic<int> ms_cnt{0};
-            int n = ms_cnt.fetch_add(1);
-            if (n < 5) {
-                fprintf(stderr, "[ms_cqe] res=%d flags=%u cb=%p handler=%p\n",
-                        cqe->res, cqe->flags, (void*)callback,
-                        (void*)(uintptr_t)callback->m_multishot_handler);
-            }
             if (callback->m_multishot_handler) {
                 callback->m_multishot_handler(
                     callback->m_multishot_ctx, cqe->res, cqe->flags);

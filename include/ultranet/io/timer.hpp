@@ -8,10 +8,20 @@
 
 namespace ynet::async::io {
 
+// Safe no-op for resubmit/cancel on timeout operations.
+class NoopTimeoutOp : public IoOperationBase {
+public:
+    void resubmit() override {}
+    void cancel() override {}
+};
+inline NoopTimeoutOp s_noop_timeout_op{};
+
 class SleepAwaitable {
 public:
     SleepAwaitable(struct __kernel_timespec ts)
-        : m_ts(ts) {}
+        : m_ts(ts) {
+        m_callback.m_operation = &s_noop_timeout_op;
+    }
 
     bool await_ready() const noexcept {
         if (m_ts.tv_sec == 0 && m_ts.tv_nsec == 0) {

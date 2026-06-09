@@ -114,6 +114,12 @@ public:
         m_pending_ops.fetch_sub(1, std::memory_order_relaxed);
     }
 
+    // Batched decrement — call once per N CQEs instead of once per CQE.
+    void decrement_pending_ops_by(size_t count) noexcept {
+        if (count > 0)
+            m_pending_ops.fetch_sub(count, std::memory_order_relaxed);
+    }
+
     bool over_watermark() const noexcept {
         return m_pending_ops.load(std::memory_order_relaxed) >= m_config.max_pending_ops;
     }

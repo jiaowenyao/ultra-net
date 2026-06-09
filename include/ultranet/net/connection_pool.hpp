@@ -20,9 +20,12 @@ public:
         size_t total_connections{0};
 
         size_t active() const noexcept {
-            return total_connections > (acquired - released) ? total_connections - (acquired - released) : 0;
+            return acquired > released ? acquired - released : 0;
         }
-        size_t idle() const noexcept { return 0; }
+        size_t idle() const noexcept {
+            size_t a = active();
+            return total_connections > a ? total_connections - a : 0;
+        }
     };
 
     ConnectionPool(ConnectionPoolConfig cfg, std::string host, uint16_t port)
@@ -130,7 +133,7 @@ private:
     ConnectionPoolConfig m_config;
     std::string m_host;
     uint16_t m_port;
-    Channel<TcpSocket, 256> m_idle;
+    Channel<TcpSocket, 1024> m_idle;
     std::atomic<bool> m_shutdown{false};
     std::atomic<size_t> m_acquired{0};
     std::atomic<size_t> m_released{0};

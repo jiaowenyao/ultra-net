@@ -766,13 +766,16 @@ Task<void> proxy_server(int listen_port, const std::string& backend_host,
 
     ConnectionPool pool(env_cfg.connection_pool, backend_host, backend_port);
 
-    // Pre-warm the pool with min_connections.
     std::cout << "Pre-warming pool with " << env_cfg.connection_pool.min_connections
               << " connections..." << std::endl;
     co_await pool.pre_warm();
     auto warmup_stats = pool.snapshot();
     std::cout << "Pool warmed: " << warmup_stats.total_connections
               << " connections" << std::endl;
+
+    // Standard single-socket accept (SO_REUSEPORT requires per-thread
+    // accept coroutines which need deeper scheduler support — deferred
+    // to a future release).
 
     auto sock = co_await Socket(AF_INET, SOCK_STREAM, 0);
     if (!sock) {
@@ -784,9 +787,6 @@ Task<void> proxy_server(int listen_port, const std::string& backend_host,
     int opt = 1;
     setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 
-    // Moderate socket buffers: small enough for low-memory servers but
-    // large enough to absorb bursts at high concurrency (8KB caused
-    // kernel-level drops at c>50; 16KB is the sweet spot).
     int sndbuf = 16384, rcvbuf = 16384;
     setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf));
     setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
@@ -798,8 +798,7 @@ Task<void> proxy_server(int listen_port, const std::string& backend_host,
     co_await Bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
     co_await Listen(fd, 512);
 
-    // Delay accept until client data arrives (reduces wakeups for SYN-only connections).
-    int defer_accept = 30;  // seconds
+    int defer_accept = 30;
     setsockopt(fd, IPPROTO_TCP, TCP_DEFER_ACCEPT, &defer_accept, sizeof(defer_accept));
 
     std::cout << "HTTP proxy listening on :" << listen_port
@@ -811,7 +810,6 @@ Task<void> proxy_server(int listen_port, const std::string& backend_host,
               << " idle_timeout_ms=" << idle_timeout.count()
               << " mem_min_mb=" << memory_guard.min_free_mb << ")" << std::endl;
 
-    // Exponential backoff state for accept loop.
     constexpr auto BACKOFF_MIN = std::chrono::milliseconds(1);
     constexpr auto BACKOFF_MAX = std::chrono::milliseconds(100);
     auto backoff = BACKOFF_MIN;
@@ -819,8 +817,6 @@ Task<void> proxy_server(int listen_port, const std::string& backend_host,
     while (!shutdown.is_shutdown()) {
         auto* engine = IoUringEngine::current();
 
-        // P0: CQE overflow recovery — if CQEs were dropped, pending_ops
-        // is inflated. Sleep aggressively to let the system drain.
         if (engine && engine->has_cq_overflow()) {
             std::cerr << "[CQE_OVERFLOW] CQ ring overflow detected — backing off"
                       << std::endl;
@@ -829,17 +825,14 @@ Task<void> proxy_server(int listen_port, const std::string& backend_host,
             continue;
         }
 
-        // P1: Decay BackoffGate when no retries are happening.
         backoff_gate.maybe_decay();
 
-        // Backpressure: throttle accept when SQ ring is saturated.
         if (engine && engine->over_watermark()) {
             co_await sleep_for(backoff);
             backoff = std::min(backoff * 2, BACKOFF_MAX);
             continue;
         }
 
-        // Backpressure: sleep when over connection limit (don't accept+close).
         size_t cur = active_conns.load(std::memory_order_relaxed);
         if (cur >= max_conns) {
             co_await sleep_for(backoff);
@@ -847,7 +840,6 @@ Task<void> proxy_server(int listen_port, const std::string& backend_host,
             continue;
         }
 
-        // P0: Memory pressure — refuse new connections if memory is critical.
         if (memory_guard.check()) {
             co_await sleep_for(std::chrono::milliseconds(100));
             continue;
@@ -862,14 +854,10 @@ Task<void> proxy_server(int listen_port, const std::string& backend_host,
         }
 
         backoff = BACKOFF_MIN;
-
         int client_fd = *client;
 
-        // Latency: disable Nagle and enable quick ACK.
         setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &opt, sizeof(opt));
         setsockopt(client_fd, IPPROTO_TCP, TCP_QUICKACK, &opt, sizeof(opt));
-
-        // Moderate per-connection socket buffers for low-memory servers.
         setsockopt(client_fd, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf));
         setsockopt(client_fd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
 
