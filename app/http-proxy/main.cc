@@ -91,13 +91,24 @@ std::optional<int64_t> safe_stoll(std::string_view sv) {
     return val;
 }
 
+// Fast case-insensitive comparison using uint64 word comparison.
+// The |0x20 trick ORs bit 5 for all-lowercase ASCII reference strings
+// (which HTTP header names are), providing correct case-insensitive
+// matching with zero false positives and zero function-call overhead.
 int64_t get_content_length(const std::vector<http::Header>& headers) {
     for (const auto& h : headers) {
-        // Case-insensitive header name compare without allocation.
-        if (h.name.size() == 14 &&
-            strncasecmp(h.name.data(), "content-length", 14) == 0) {
-            auto v = safe_stoll(h.value);
-            return v.has_value() ? *v : -1;
+        if (h.name.size() == 14) {
+            uint64_t lo, hi, ref_lo, ref_hi;
+            std::memcpy(&lo, h.name.data(), 8);
+            std::memcpy(&hi, h.name.data() + 6, 8);
+            std::memcpy(&ref_lo, "content-", 8);
+            std::memcpy(&ref_hi, "t-length", 8);
+            constexpr uint64_t kCM = 0x2020202020202020ULL;
+            if (((lo | kCM) == (ref_lo | kCM)) &&
+                ((hi | kCM) == (ref_hi | kCM))) {
+                auto v = safe_stoll(h.value);
+                return v.has_value() ? *v : -1;
+            }
         }
     }
     return -1;
@@ -106,9 +117,14 @@ int64_t get_content_length(const std::vector<http::Header>& headers) {
 bool request_keepalive(const http::HttpRequest& req) {
     auto conn = req.header("connection");
     if (conn.empty()) return req.http_version == "HTTP/1.1";
-    // Case-insensitive search for "close" — zero allocation.
+    constexpr uint64_t kClose = 0x00000065736F6C63ULL;  // "close\0\0\0" LE
+    constexpr uint64_t kCM = 0x2020202020202020ULL;
     for (size_t i = 0; i + 5 <= conn.size(); ++i) {
-        if (strncasecmp(conn.data() + i, "close", 5) == 0) return false;
+        uint64_t word = 0;
+        size_t n = conn.size() - i;
+        if (n > 8) n = 8;
+        std::memcpy(&word, conn.data() + i, n);
+        if ((word | kCM) == (kClose | kCM)) return false;
     }
     return req.http_version == "HTTP/1.1";
 }
@@ -346,6 +362,58 @@ Task<void> safe_close(int fd) {
     }
 }
 
+// --- LinkedWriteThenRead ---
+// Submits write+read SQEs chained with IOSQE_IO_LINK, saving one CQE
+// round-trip per request when the entire write fits in one TCP send.
+
+class NullResubmitOp : public IoOperationBase {
+public:
+    void resubmit() override {}
+    void cancel() override {}
+};
+inline NullResubmitOp s_null_resubmit_op{};
+
+struct LinkedWriteThenRead {
+    int m_fd;
+    const uint8_t* m_wbuf; size_t m_wlen;
+    uint8_t* m_rbuf; size_t m_rlen;
+    IoCallback m_cb{};
+
+    LinkedWriteThenRead(int fd, const uint8_t* wbuf, size_t wlen,
+                        uint8_t* rbuf, size_t rlen)
+        : m_fd(fd), m_wbuf(wbuf), m_wlen(wlen), m_rbuf(rbuf), m_rlen(rlen) {
+        m_cb.m_operation = &s_null_resubmit_op;
+    }
+
+    bool await_ready() noexcept { return m_cb.m_completed; }
+
+    void await_suspend(std::coroutine_handle<> h) noexcept {
+        auto* eng = IoUringEngine::current();
+        if (!eng || eng->over_watermark()) {
+            m_cb.m_result = -ENOBUFS; m_cb.m_completed = true; h.resume(); return;
+        }
+        io_uring_sqe *sqe_w = eng->get_sqe(), *sqe_r = eng->get_sqe();
+        if (!sqe_w || !sqe_r) {
+            m_cb.m_result = -ENOBUFS; m_cb.m_completed = true; h.resume(); return;
+        }
+        sqe_w->flags |= IOSQE_IO_LINK;
+        io_uring_prep_write(sqe_w, m_fd, m_wbuf, m_wlen, 0);
+        io_uring_sqe_set_data(sqe_w, nullptr);
+        io_uring_prep_recv(sqe_r, m_fd, m_rbuf, m_rlen, 0);
+        io_uring_sqe_set_data(sqe_r, &m_cb);
+        m_cb.m_handle = h;
+        eng->increment_pending(); eng->increment_pending();
+        eng->increment_pending_ops();
+        eng->submit_now();
+    }
+
+    IoResult<size_t> await_resume() noexcept {
+        if (m_cb.m_result < 0)
+            return std::unexpected(make_io_error(m_cb.m_result));
+        return static_cast<size_t>(m_cb.m_result);
+    }
+};
+
 // --- Proxy session ---
 
 Task<void> proxy_session(int client_fd, ConnectionPool& pool,
@@ -387,9 +455,24 @@ Task<void> proxy_session(int client_fd, ConnectionPool& pool,
 
     auto forward_one = [&](PooledConnection& conn,
                            size_t total_req) -> Task<bool> {
-        // Forward request to backend.
         size_t written = 0;
         const uint8_t* req_data = client_buf.head();
+
+        bool linked_ok = false;
+        if (total_req > 0 && total_req <= kIOBufSize) {
+            LinkedWriteThenRead linked(conn.fd(), req_data, total_req,
+                                       io_buf, sizeof(io_buf));
+            auto n = co_await linked;
+            if (n && *n > 0) {
+                written = total_req;
+                backend_buf.append(io_buf, static_cast<size_t>(*n));
+                linked_ok = true;
+            } else if (n.error().value() != ENOBUFS) {
+                conn.mark_invalid(); co_return false;
+            }
+        }
+
+        if (!linked_ok) {
         while (written < total_req) {
             auto w = co_await conn.socket().write(req_data + written,
                                                    total_req - written);
@@ -418,6 +501,7 @@ Task<void> proxy_session(int client_fd, ConnectionPool& pool,
             conn.mark_invalid();
             co_return false;
         }
+        }  // !linked_ok
 
         // Read response from backend.
         http::HttpResponse resp;

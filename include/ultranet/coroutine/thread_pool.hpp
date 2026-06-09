@@ -280,6 +280,23 @@ private:
         auto* callback = reinterpret_cast<io::IoCallback*>(io_uring_cqe_get_data(cqe));
         if (!callback) return;
 
+        // Multishot: one SQE → many CQEs. Dispatch to custom handler,
+        // do NOT touch m_result/m_completed/pending_ops.
+        if (callback->m_is_multishot) {
+            static std::atomic<int> ms_cnt{0};
+            int n = ms_cnt.fetch_add(1);
+            if (n < 5) {
+                fprintf(stderr, "[ms_cqe] res=%d flags=%u cb=%p handler=%p\n",
+                        cqe->res, cqe->flags, (void*)callback,
+                        (void*)(uintptr_t)callback->m_multishot_handler);
+            }
+            if (callback->m_multishot_handler) {
+                callback->m_multishot_handler(
+                    callback->m_multishot_ctx, cqe->res, cqe->flags);
+            }
+            return;
+        }
+
         callback->m_result = cqe->res;
         callback->m_completed = true;
 

@@ -83,6 +83,13 @@ struct UltraNetConfig {
             c.service_discovery.refresh_interval = std::chrono::milliseconds(std::atoll(v));
         if (const char* v = std::getenv("ULTRANET_SD_HEALTH_MS"))
             c.service_discovery.health_check_interval = std::chrono::milliseconds(std::atoll(v));
+        if (const char* v = std::getenv("ULTRANET_IO_SQPOLL")) {
+            c.io_uring.enable_sq_poll = (std::atoi(v) != 0);
+        }
+        if (const char* v = std::getenv("ULTRANET_IO_SQPOLL_CPU"))
+            c.io_uring.sq_poll_thread_cpu = static_cast<uint32_t>(std::atoll(v));
+        if (const char* v = std::getenv("ULTRANET_IO_SQPOLL_IDLE"))
+            c.io_uring.sq_poll_thread_idle = static_cast<uint32_t>(std::atoll(v));
         if (const char* v = std::getenv("ULTRANET_LOG_LEVEL")) {
             int lvl = std::atoi(v);
             if (lvl >= 0 && lvl <= 5) c.log.level = static_cast<log::Level>(lvl);

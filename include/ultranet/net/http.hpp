@@ -277,9 +277,18 @@ struct HttpResponse {
 
     bool is_keepalive() const {
         auto v = header("connection");
-        // Zero-allocation case-insensitive substring search for "keep-alive".
+        // Fast case-insensitive search for "keep-alive" (10 bytes) using
+        // two overlapping 8-byte word comparisons with the |0x20 bitmask
+        // trick — safe for all-lowercase ASCII reference strings.
+        constexpr uint64_t kKA1 = 0x696C612D7065656BULL;  // "keep-ali" LE
+        constexpr uint64_t kKA2 = 0x6576696C612D7065ULL;  // "ep-alive" LE
+        constexpr uint64_t kCM = 0x2020202020202020ULL;
         for (size_t i = 0; i + 10 <= v.size(); ++i) {
-            if (strncasecmp(v.data() + i, "keep-alive", 10) == 0) return true;
+            uint64_t w1, w2;
+            std::memcpy(&w1, v.data() + i, 8);
+            std::memcpy(&w2, v.data() + i + 2, 8);
+            if (((w1 | kCM) == (kKA1 | kCM)) &&
+                ((w2 | kCM) == (kKA2 | kCM))) return true;
         }
         return false;
     }

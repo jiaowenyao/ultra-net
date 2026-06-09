@@ -26,6 +26,13 @@ struct IoCallback {
     // 操作开始时间（用于延迟统计）
     std::chrono::steady_clock::time_point m_start_time{};
 
+    // Multishot 支持: 单个 SQE 产生多个 CQE（如 multishot accept/recv）。
+    // 当 m_is_multishot 为 true 时，on_io_completion 不设置 m_result/
+    // m_completed，也不递减 pending_ops。改为调用 m_multishot_handler。
+    bool m_is_multishot{false};
+    void (*m_multishot_handler)(void* ctx, int res, unsigned cqe_flags){nullptr};
+    void* m_multishot_ctx{nullptr};
+
     // 重置回调，准备重用
     void reset() noexcept {
         m_handle = nullptr;
