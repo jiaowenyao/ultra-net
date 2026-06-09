@@ -5,7 +5,8 @@
 #include <unordered_map>
 #include <memory>
 #include <atomic>
-#include "ultranet/buffer/buffer.h"
+// BufferGroup forward-declared; full definition needed only by methods
+// defined out-of-line in src/io_engine.cc (breaks circular dependency).
 
 namespace ynet::async::io {
 
@@ -190,26 +191,8 @@ public:
     io_uring* get_ring() noexcept { return &m_ring; }
     bool is_valid() const noexcept { return m_ring.ring_fd >= 0; }
 
-    // 注册Buffer Group
-    BufferGroup& register_buffer_group(unsigned gid, size_t entries = 1024, size_t buf_size = 4096) {
-        auto it = m_buffer_groups.find(gid);
-        if (it != m_buffer_groups.end()) {
-            return *it->second;
-        }
-        auto group = std::make_unique<BufferGroup>(gid, entries, buf_size);
-        auto* ptr = group.get();
-        m_buffer_groups[gid] = std::move(group);
-        return *ptr;
-    }
-
-    // 获取buffer
-    void* get_buffer(unsigned gid, unsigned bid) noexcept {
-        auto it = m_buffer_groups.find(gid);
-        if (it != m_buffer_groups.end()) {
-            return it->second->get_buffer(bid);
-        }
-        return nullptr;
-    }
+    BufferGroup& register_buffer_group(unsigned gid, size_t entries = 1024, size_t buf_size = 4096);
+    void* get_buffer(unsigned gid, unsigned bid) noexcept;
 
 private:
     explicit IoUringEngine(const Config& config)
@@ -236,13 +219,7 @@ private:
         }
     }
 
-    ~IoUringEngine() {
-        if (m_ring.ring_fd >= 0) {
-            io_uring_submit(&m_ring);
-            m_buffer_groups.clear();
-            io_uring_queue_exit(&m_ring);
-        }
-    }
+    ~IoUringEngine();  // defined in src/io_engine.cc
 
     IoUringEngine(const IoUringEngine&) = delete;
     IoUringEngine& operator=(const IoUringEngine&) = delete;

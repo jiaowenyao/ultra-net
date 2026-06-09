@@ -50,7 +50,7 @@ endif()
 
 # Create ultranet library (99% header-only; buffer.cc handles io_uring registration)
 set(ULTRANET_SOURCES
-    src/buffer/buffer.cc
+    src/io_engine.cc
 )
 
 # Headers that users need (exposed via include/ultranet/)
