@@ -1,7 +1,7 @@
 #pragma once
 
-#include "scheduler.h"
-#include "execution_context.hpp"
+#include "ultranet/coroutine/scheduler.h"
+#include "ultranet/coroutine/execution_context.hpp"
 #include "task.hpp"
 #include "ultranet/io/reactor.hpp"
 #include "queue.hpp"

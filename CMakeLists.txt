@@ -48,15 +48,15 @@ else()
     pkg_check_modules(spdlog QUIET spdlog)
 endif()
 
-# Create ultranet library
+# Create ultranet library (99% header-only; buffer.cc handles io_uring registration)
 set(ULTRANET_SOURCES
     src/buffer/buffer.cc
 )
 
 # Headers that users need (exposed via include/ultranet/)
 set(ULTRANET_PUBLIC_HEADERS
-    src/scheduler.h
-    src/execution_context.hpp
+    include/ultranet/coroutine/scheduler.h
+    include/ultranet/coroutine/execution_context.hpp
     include/ultranet/coroutine/task.hpp
     include/ultranet/coroutine/thread_pool.hpp
     include/ultranet/coroutine/queue.hpp
@@ -105,7 +105,6 @@ add_library(ultranet ${ULTRANET_SOURCES} ${ULTRANET_PUBLIC_HEADERS})
 target_include_directories(ultranet
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
         $<INSTALL_INTERFACE:include>
         ${liburing_INCLUDE_DIRS}
 )
@@ -137,11 +136,11 @@ install(TARGETS ultranet
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
 
-# Install public headers (from src/ to include/ultranet/)
+# Install public headers from include/ultranet/
 install(FILES
         ultranet/coroutine/task.hpp
-        src/scheduler.h
-        src/execution_context.hpp
+        ultranet/coroutine/scheduler.h
+        ultranet/coroutine/execution_context.hpp
         ultranet/coroutine/thread_pool.hpp
         ultranet/coroutine/queue.hpp
         ultranet/coroutine/unified_task.hpp

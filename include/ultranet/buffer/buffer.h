@@ -1,4 +1,3 @@
-// src/io/buffer.hpp
 #pragma once
 
 #include <atomic>
@@ -7,28 +6,21 @@
 
 namespace ynet::async::io {
 
-// Buffer Group - liburing 2.5 兼容版本
+// Buffer Group - io_uring registered buffer ring for zero-copy I/O.
+// Compatible with liburing >= 2.5.  The kernel manages buffer lifecycles
+// automatically once the ring is registered.
 class BufferGroup {
 public:
     BufferGroup(unsigned gid, size_t entries = 1024, size_t buf_size = 4096);
-
     ~BufferGroup();
 
-    // 禁止拷贝移动
     BufferGroup(const BufferGroup&) = delete;
     BufferGroup& operator=(const BufferGroup&) = delete;
 
-    // 获取buffer指针（通过bid）
     void* get_buffer(unsigned bid) const noexcept;
-
-    // 分配新的buffer ID（用于用户管理）
     unsigned allocate_bid() noexcept;
-    // liburing 2.5 没有io_uring_buf_ring_add，我们只做注册
-    // 内核会自动管理buffer ring
     void release_buffer(unsigned) noexcept;
-
     unsigned bgid() const noexcept;
-
     size_t entries() const noexcept { return m_entries; }
     size_t buf_size() const noexcept { return m_buf_size; }
 
@@ -45,4 +37,3 @@ private:
 };
 
 } // namespace ynet::async::io
-
