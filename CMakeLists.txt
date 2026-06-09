@@ -107,7 +107,6 @@ target_include_directories(ultranet
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
         $<INSTALL_INTERFACE:include>
-    PRIVATE
         ${liburing_INCLUDE_DIRS}
 )
 

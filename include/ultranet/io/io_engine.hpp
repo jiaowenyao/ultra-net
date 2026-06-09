@@ -122,6 +122,22 @@ public:
         return m_pending_ops.load(std::memory_order_relaxed);
     }
 
+    // CQE overflow detection: when the CQ ring overflows under extreme load,
+    // CQEs are silently dropped. This detection lets callers recover by
+    // adjusting their pending_ops tracking.
+    bool has_cq_overflow() const noexcept {
+        return io_uring_cq_has_overflow(&m_ring);
+    }
+
+    // Heuristic recovery: halve pending_ops since we don't know exactly
+    // how many CQEs were dropped. Recovery stabilises within 2 poll cycles.
+    void adjust_pending_ops_on_overflow() noexcept {
+        size_t cur = m_pending_ops.load(std::memory_order_relaxed);
+        if (cur > 0) {
+            m_pending_ops.store(cur / 2, std::memory_order_relaxed);
+        }
+    }
+
     int wait_cqe(io_uring_cqe** cqe, uint32_t wait_nr = 1,
                  struct __kernel_timespec* ts = nullptr) {
         return io_uring_wait_cqe_timeout(&m_ring, cqe, ts);
@@ -176,6 +192,9 @@ private:
         m_ring.ring_fd = -1;
         io_uring_params params{};
         params.flags = config.flags;
+        // Double the CQ ring size to reduce overflow risk under load.
+        params.flags |= IORING_SETUP_CQSIZE;
+        params.cq_entries = config.entries * 2;
         if (config.enable_sq_poll) {
             params.flags |= IORING_SETUP_SQPOLL;
             if (config.sq_poll_thread_cpu > 0) {

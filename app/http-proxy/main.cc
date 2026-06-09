@@ -27,6 +27,11 @@
 #include <atomic>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <optional>
+#include <cerrno>
+#include <climits>
+#include <strings.h>
+#include <cstdio>
 
 using namespace ynet::async;
 using namespace ynet::async::io;
@@ -35,8 +40,10 @@ using namespace ynet::async::lifecycle;
 
 namespace {
 
-constexpr size_t kDefaultMaxBuf = 256 * 1024;
+// Reduced for low-resource servers (was 256KB).
+constexpr size_t kDefaultMaxBuf = 128 * 1024;
 constexpr size_t kDefaultMaxConns = 512;
+constexpr size_t kIOBufSize = 8192;
 
 // --- Runtime-configurable helpers ---
 
@@ -58,12 +65,40 @@ std::chrono::milliseconds get_backend_timeout() {
     return std::chrono::seconds(30);
 }
 
+std::chrono::milliseconds get_idle_timeout() {
+    if (const char* v = std::getenv("ULTRANET_PROXY_IDLE_TIMEOUT_MS"))
+        return std::chrono::milliseconds(std::atoll(v));
+    return std::chrono::seconds(60);
+}
+
+size_t get_mem_min_mb() {
+    if (const char* v = std::getenv("ULTRANET_PROXY_MEM_MIN_MB"))
+        return static_cast<size_t>(std::atoll(v));
+    return 128;
+}
+
+// Exception-free int64 parser. std::stoll throws — fatal in coroutine context.
+std::optional<int64_t> safe_stoll(std::string_view sv) {
+    if (sv.empty()) return std::nullopt;
+    char buf[32];
+    size_t len = sv.size() < sizeof(buf) - 1 ? sv.size() : sizeof(buf) - 1;
+    std::memcpy(buf, sv.data(), len);
+    buf[len] = '\0';
+    char* end = nullptr;
+    errno = 0;
+    int64_t val = strtoll(buf, &end, 10);
+    if (errno == ERANGE || end == buf || *end != '\0') return std::nullopt;
+    return val;
+}
+
 int64_t get_content_length(const std::vector<http::Header>& headers) {
     for (const auto& h : headers) {
-        std::string lower = h.name;
-        std::transform(lower.begin(), lower.end(), lower.begin(),
-                       [](unsigned char c) { return std::tolower(c); });
-        if (lower == "content-length") return std::stoll(h.value);
+        // Case-insensitive header name compare without allocation.
+        if (h.name.size() == 14 &&
+            strncasecmp(h.name.data(), "content-length", 14) == 0) {
+            auto v = safe_stoll(h.value);
+            return v.has_value() ? *v : -1;
+        }
     }
     return -1;
 }
@@ -71,25 +106,38 @@ int64_t get_content_length(const std::vector<http::Header>& headers) {
 bool request_keepalive(const http::HttpRequest& req) {
     auto conn = req.header("connection");
     if (conn.empty()) return req.http_version == "HTTP/1.1";
-    std::string lower(conn);
-    std::transform(lower.begin(), lower.end(), lower.begin(),
-                   [](unsigned char c) { return std::tolower(c); });
-    if (lower.find("close") != std::string::npos) return false;
+    // Case-insensitive search for "close" — zero allocation.
+    for (size_t i = 0; i + 5 <= conn.size(); ++i) {
+        if (strncasecmp(conn.data() + i, "close", 5) == 0) return false;
+    }
     return req.http_version == "HTTP/1.1";
 }
 
 // --- SlidingBuffer ---
 // Avoids O(N) std::vector::erase() churn.
+// Lazy compaction: only erase when offset is large AND remaining data
+// is much smaller than the consumed portion.
 
 struct SlidingBuffer {
     std::vector<uint8_t> data;
     size_t offset = 0;
 
     SlidingBuffer() {
-        data.reserve(16384);
+        data.reserve(4096);
     }
 
     void append(const uint8_t* ptr, size_t len) {
+        // Geometric preallocation to avoid repeated reallocations during
+        // streaming reads. 1.5x growth with a 4KB floor to handle the
+        // zero-capacity edge case (0 * 1.5 = 0).  Saturates at needed
+        // when the request is larger than the geometric projection.
+        size_t needed = data.size() + len;
+        if (needed > data.capacity()) {
+            size_t grow = data.capacity() + data.capacity() / 2;
+            if (grow < 4096) grow = 4096;
+            size_t new_cap = needed > grow ? needed : grow;
+            data.reserve(new_cap);
+        }
         data.insert(data.end(), ptr, ptr + len);
     }
 
@@ -98,14 +146,19 @@ struct SlidingBuffer {
 
     void consume(size_t n) {
         offset += n;
-        if (offset > data.size() / 2) {
+        if (offset > data.size() / 2 && offset > remaining() * 4) {
             data.erase(data.begin(), data.begin() + offset);
             offset = 0;
         }
     }
 
     void reset() {
-        data.clear();
+        // Release large buffers between keepalive cycles to bound RSS.
+        if (data.capacity() > 131072) {
+            std::vector<uint8_t>().swap(data);
+        } else {
+            data.clear();
+        }
         offset = 0;
     }
 };
@@ -171,13 +224,137 @@ private:
     bool m_invalid = false;
 };
 
+// --- MemoryGuard ---
+// Reads /proc/meminfo periodically to detect memory pressure.
+// When available memory drops below min_free_mb, the accept loop
+// sleeps to prevent accepting new connections that would risk OOM.
+
+struct MemoryGuard {
+    size_t min_free_mb;
+    std::chrono::steady_clock::time_point last_check;
+    bool critical{false};
+    static constexpr auto kCheckInterval = std::chrono::seconds(2);
+
+    explicit MemoryGuard(size_t min_mb) : min_free_mb(min_mb) {}
+
+    bool check() {
+        auto now = std::chrono::steady_clock::now();
+        if (now - last_check < kCheckInterval) return critical;
+        last_check = now;
+
+        auto avail = get_available_memory_mb();
+        critical = avail.has_value() && *avail < min_free_mb;
+        if (critical) {
+            std::cerr << "[MemoryGuard] CRITICAL: " << *avail
+                      << "MB available < " << min_free_mb << "MB min" << std::endl;
+        }
+        return critical;
+    }
+
+    static std::optional<size_t> get_available_memory_mb() {
+        FILE* f = std::fopen("/proc/meminfo", "r");
+        if (!f) return std::nullopt;
+        char line[256];
+        while (std::fgets(line, sizeof(line), f)) {
+            if (strncmp(line, "MemAvailable:", 13) == 0) {
+                long kb = 0;
+                std::sscanf(line + 13, "%ld", &kb);
+                std::fclose(f);
+                return static_cast<size_t>(kb / 1024);
+            }
+        }
+        std::fclose(f);
+        return std::nullopt;
+    }
+};
+
+// --- BackoffGate ---
+// Global ENOBUFS retry coordination. When many coroutines retry
+// simultaneously, the per-coroutine fixed 10ms sleep creates a
+// retry storm.  BackoffGate scales backoff with retry_count /
+// active_conns ratio, and decays when idle.
+
+struct BackoffGate {
+    std::atomic<size_t> retry_count{0};
+    std::atomic<int64_t> backoff_us{0};  // 0 = no extra backoff
+
+    static constexpr int64_t kBaseBackoffUs = 10'000;   // 10ms base
+    static constexpr int64_t kMaxBackoffUs = 200'000;    // 200ms cap
+    static constexpr int64_t kDecayUs = 5'000;            // decay 5ms per step
+
+    void register_retry(size_t active_conns) {
+        retry_count.fetch_add(1, std::memory_order_relaxed);
+        size_t rc = retry_count.load(std::memory_order_relaxed);
+        size_t ac = std::max<size_t>(active_conns, 1);
+        int64_t target = static_cast<int64_t>(kBaseBackoffUs *
+            (1 + static_cast<double>(rc) / ac));
+        if (target > kMaxBackoffUs) target = kMaxBackoffUs;
+        // Only increase, never decrease on register.
+        int64_t cur = backoff_us.load(std::memory_order_relaxed);
+        while (target > cur &&
+               !backoff_us.compare_exchange_weak(cur, target, std::memory_order_relaxed));
+    }
+
+    void unregister_retry() {
+        retry_count.fetch_sub(1, std::memory_order_relaxed);
+    }
+
+    // Called from accept loop when no retries are happening.
+    void maybe_decay() {
+        if (retry_count.load(std::memory_order_relaxed) > 0) return;
+        int64_t cur = backoff_us.load(std::memory_order_relaxed);
+        if (cur > 0) {
+            int64_t next = std::max<int64_t>(0, cur - kDecayUs);
+            backoff_us.compare_exchange_strong(cur, next, std::memory_order_relaxed);
+        }
+    }
+
+    int64_t current_backoff_us() const {
+        return backoff_us.load(std::memory_order_relaxed);
+    }
+};
+
+// RAII guard that registers/unregisters with BackoffGate.
+// IMPORTANT: armed defaults to false because the constructor does NOT call
+// register_retry(). Callers must set armed=true after calling register_retry().
+// The destructor unregisters only when armed, preventing atomic underflow
+// on the success path (where no ENOBUFS occurred).
+struct RetryGuard {
+    BackoffGate& gate;
+    bool armed = false;
+    explicit RetryGuard(BackoffGate& g) : gate(g) {}
+    ~RetryGuard() { if (armed) gate.unregister_retry(); }
+    void dismiss() { armed = false; gate.unregister_retry(); }
+};
+
+// --- safe_close ---
+// io_uring Close can fail (ENOBUFS, ring full). Fall back to ::close()
+// to guarantee the fd is released.
+//
+// Graceful TCP shutdown: calling ::shutdown(fd, SHUT_RDWR) before close
+// initiates the FIN handshake. Without this, close() on a socket with
+// unread data sends RST, causing "socket read errors" on the peer (wrk).
+// The shutdown syscall is non-blocking and always succeeds or is harmless
+// on an already-broken fd.
+
+Task<void> safe_close(int fd) {
+    if (fd < 0) co_return;
+    ::shutdown(fd, SHUT_RDWR);
+    auto result = co_await Close(fd);
+    if (!result) {
+        ::close(fd);
+    }
+}
+
 // --- Proxy session ---
 
 Task<void> proxy_session(int client_fd, ConnectionPool& pool,
                          ShutdownCoordinator& shutdown,
                          std::atomic<size_t>& active_conns,
                          size_t max_buf,
-                         std::chrono::milliseconds backend_timeout) {
+                         std::chrono::milliseconds backend_timeout,
+                         std::chrono::milliseconds idle_timeout,
+                         BackoffGate& backoff_gate) {
     // RAII connection tracker: decrements on scope exit.
     struct ConnTracker {
         std::atomic<size_t>& counter;
@@ -188,11 +365,25 @@ Task<void> proxy_session(int client_fd, ConnectionPool& pool,
 
     SlidingBuffer client_buf;
     SlidingBuffer backend_buf;
-    uint8_t io_buf[16384];
+    uint8_t io_buf[kIOBufSize];
 
-    // ENOBUFS retry: cooperative backoff when io_uring is saturated.
+    // ENOBUFS retry: cooperative backoff coordinated by BackoffGate.
     constexpr int MAX_ENOBUFS_RETRIES = 10;
-    constexpr auto ENOBUFS_SLEEP = std::chrono::milliseconds(10);
+
+    auto enobufs_sleep = [&](RetryGuard& guard) -> Task<void> {
+        int64_t us = backoff_gate.current_backoff_us();
+        if (us <= 0) us = 10'000;  // fallback 10ms
+        co_await sleep_for(std::chrono::microseconds(us));
+        // Re-register to keep backoff active across retries.
+        guard.dismiss();
+        backoff_gate.register_retry(active_conns.load(std::memory_order_relaxed));
+        guard.armed = true;
+    };
+
+    auto enable_quickack = [&]() {
+        int opt = 1;
+        setsockopt(client_fd, IPPROTO_TCP, TCP_QUICKACK, &opt, sizeof(opt));
+    };
 
     auto forward_one = [&](PooledConnection& conn,
                            size_t total_req) -> Task<bool> {
@@ -207,8 +398,22 @@ Task<void> proxy_session(int client_fd, ConnectionPool& pool,
                 continue;
             }
             if (w.error().value() == ENOBUFS) {
-                co_await sleep_for(ENOBUFS_SLEEP);
-                continue;
+                RetryGuard guard(backoff_gate);
+                backoff_gate.register_retry(active_conns.load(std::memory_order_relaxed));
+                guard.armed = true;
+                for (int retry = 0; retry < MAX_ENOBUFS_RETRIES; ++retry) {
+                    co_await enobufs_sleep(guard);
+                    auto rw = co_await conn.socket().write(req_data + written,
+                                                            total_req - written);
+                    if (rw) { written += *rw; break; }
+                    if (rw.error().value() != ENOBUFS) {
+                        conn.mark_invalid();
+                        co_return false;
+                    }
+                }
+                if (written >= total_req) break;
+                conn.mark_invalid();
+                co_return false;
             }
             conn.mark_invalid();
             co_return false;
@@ -217,7 +422,6 @@ Task<void> proxy_session(int client_fd, ConnectionPool& pool,
         // Read response from backend.
         http::HttpResponse resp;
         size_t resp_consumed = 0;
-        int enobufs = 0;
         while (resp_consumed == 0) {
             resp_consumed = resp.parse(
                 reinterpret_cast<const char*>(backend_buf.head()),
@@ -236,9 +440,30 @@ Task<void> proxy_session(int client_fd, ConnectionPool& pool,
                 }
                 continue;
             }
-            if (n.error().value() == ENOBUFS && enobufs < MAX_ENOBUFS_RETRIES) {
-                ++enobufs;
-                co_await sleep_for(ENOBUFS_SLEEP);
+            if (n.error().value() == ENOBUFS) {
+                RetryGuard guard(backoff_gate);
+                backoff_gate.register_retry(active_conns.load(std::memory_order_relaxed));
+                guard.armed = true;
+                int enobufs = 0;
+                while (enobufs < MAX_ENOBUFS_RETRIES) {
+                    ++enobufs;
+                    co_await enobufs_sleep(guard);
+                    Read retry_reader(conn.fd(), io_buf, sizeof(io_buf));
+                    retry_reader.with_timeout(backend_timeout);
+                    auto rn = co_await retry_reader;
+                    if (rn && *rn > 0) {
+                        backend_buf.append(io_buf, *rn);
+                        if (backend_buf.data.size() > max_buf) {
+                            conn.mark_invalid();
+                            co_return false;
+                        }
+                        break;
+                    }
+                    if (rn.error().value() != ENOBUFS) {
+                        conn.mark_invalid();
+                        co_return false;
+                    }
+                }
                 continue;
             }
             conn.mark_invalid();
@@ -254,8 +479,19 @@ Task<void> proxy_session(int client_fd, ConnectionPool& pool,
             auto w = co_await client_writer;
             if (w) { fwd += *w; continue; }
             if (w.error().value() == ENOBUFS) {
-                co_await sleep_for(ENOBUFS_SLEEP);
-                continue;
+                RetryGuard guard(backoff_gate);
+                backoff_gate.register_retry(active_conns.load(std::memory_order_relaxed));
+                guard.armed = true;
+                for (int retry = 0; retry < MAX_ENOBUFS_RETRIES; ++retry) {
+                    co_await enobufs_sleep(guard);
+                    Write retry_writer(client_fd, resp_data + fwd,
+                                       resp_consumed - fwd);
+                    auto rw = co_await retry_writer;
+                    if (rw) { fwd += *rw; break; }
+                    if (rw.error().value() != ENOBUFS) co_return false;
+                }
+                if (fwd >= resp_consumed) break;
+                co_return false;
             }
             co_return false;
         }
@@ -267,68 +503,137 @@ Task<void> proxy_session(int client_fd, ConnectionPool& pool,
         co_return true;
     };
 
+    // Keepalive read timeout: short for first request, longer for idle.
+    bool is_first_request = true;
+
     while (!shutdown.is_shutdown()) {
         // --- Read request from client ---
         http::HttpRequest req;
         size_t consumed = 0;
-        int enobufs = 0;
-        while (consumed == 0) {
-            Read reader(client_fd, io_buf, sizeof(io_buf));
-            reader.with_timeout(std::chrono::seconds(10));
-            auto n = co_await reader;
-            if (n) {
-                if (*n == 0) { co_await Close(client_fd); co_return; }
-                client_buf.append(io_buf, *n);
-                if (client_buf.data.size() > max_buf) {
-                    co_await Close(client_fd);
-                    co_return;
+        {
+            RetryGuard guard(backoff_gate);
+            while (consumed == 0) {
+                Read reader(client_fd, io_buf, sizeof(io_buf));
+                // Staged timeout: 10s for first request, configurable for idle keepalive.
+                if (is_first_request) {
+                    reader.with_timeout(std::chrono::seconds(10));
+                } else {
+                    reader.with_timeout(idle_timeout);
                 }
-                consumed = req.parse(
-                    reinterpret_cast<const char*>(client_buf.head()),
-                    client_buf.remaining());
-                continue;
+                auto n = co_await reader;
+                if (n) {
+                    if (*n == 0) { co_await safe_close(client_fd); co_return; }
+                    // Re-enable QUICKACK after each read — it's one-shot.
+                    enable_quickack();
+                    client_buf.append(io_buf, *n);
+                    if (client_buf.data.size() > max_buf) {
+                        co_await safe_close(client_fd);
+                        co_return;
+                    }
+                    consumed = req.parse(
+                        reinterpret_cast<const char*>(client_buf.head()),
+                        client_buf.remaining());
+                    continue;
+                }
+                if (n.error().value() == ENOBUFS) {
+                    backoff_gate.register_retry(active_conns.load(std::memory_order_relaxed));
+                    guard.armed = true;
+                    int enobufs = 0;
+                    while (enobufs < MAX_ENOBUFS_RETRIES) {
+                        ++enobufs;
+                        co_await enobufs_sleep(guard);
+                        Read retry_reader(client_fd, io_buf, sizeof(io_buf));
+                        if (is_first_request) {
+                            retry_reader.with_timeout(std::chrono::seconds(10));
+                        } else {
+                            retry_reader.with_timeout(idle_timeout);
+                        }
+                        auto rn = co_await retry_reader;
+                        if (rn && *rn > 0) {
+                            enable_quickack();
+                            client_buf.append(io_buf, *rn);
+                            if (client_buf.data.size() > max_buf) {
+                                co_await safe_close(client_fd);
+                                co_return;
+                            }
+                            consumed = req.parse(
+                                reinterpret_cast<const char*>(client_buf.head()),
+                                client_buf.remaining());
+                            break;
+                        }
+                        if (rn.error().value() != ENOBUFS) {
+                            co_await safe_close(client_fd);
+                            co_return;
+                        }
+                    }
+                    guard.dismiss();
+                    continue;
+                }
+                // ETIMEDOUT or other error — close and release.
+                co_await safe_close(client_fd);
+                co_return;
             }
-            if (n.error().value() == ENOBUFS && enobufs < MAX_ENOBUFS_RETRIES) {
-                ++enobufs;
-                co_await sleep_for(ENOBUFS_SLEEP);
-                continue;
-            }
-            co_await Close(client_fd);
-            co_return;
         }
+
+        is_first_request = false;
 
         // Wait for body bytes.
         int64_t body_len = get_content_length(req.headers);
         size_t total_req = consumed +
             (body_len > 0 ? static_cast<size_t>(body_len) : 0);
 
-        enobufs = 0;
-        while (client_buf.remaining() < total_req) {
-            Read reader(client_fd, io_buf, sizeof(io_buf));
-            reader.with_timeout(std::chrono::seconds(30));
-            auto n = co_await reader;
-            if (n) {
-                if (*n == 0) { co_await Close(client_fd); co_return; }
-                client_buf.append(io_buf, *n);
-                if (client_buf.data.size() > max_buf) {
-                    co_await Close(client_fd);
-                    co_return;
+        {
+            RetryGuard guard(backoff_gate);
+            while (client_buf.remaining() < total_req) {
+                Read reader(client_fd, io_buf, sizeof(io_buf));
+                reader.with_timeout(std::chrono::seconds(30));
+                auto n = co_await reader;
+                if (n) {
+                    if (*n == 0) { co_await safe_close(client_fd); co_return; }
+                    enable_quickack();
+                    client_buf.append(io_buf, *n);
+                    if (client_buf.data.size() > max_buf) {
+                        co_await safe_close(client_fd);
+                        co_return;
+                    }
+                    continue;
                 }
-                continue;
+                if (n.error().value() == ENOBUFS) {
+                    backoff_gate.register_retry(active_conns.load(std::memory_order_relaxed));
+                    guard.armed = true;
+                    int enobufs = 0;
+                    while (enobufs < MAX_ENOBUFS_RETRIES) {
+                        ++enobufs;
+                        co_await enobufs_sleep(guard);
+                        Read retry_reader(client_fd, io_buf, sizeof(io_buf));
+                        retry_reader.with_timeout(std::chrono::seconds(30));
+                        auto rn = co_await retry_reader;
+                        if (rn && *rn > 0) {
+                            enable_quickack();
+                            client_buf.append(io_buf, *rn);
+                            if (client_buf.data.size() > max_buf) {
+                                co_await safe_close(client_fd);
+                                co_return;
+                            }
+                            break;
+                        }
+                        if (rn.error().value() != ENOBUFS) {
+                            co_await safe_close(client_fd);
+                            co_return;
+                        }
+                    }
+                    guard.dismiss();
+                    continue;
+                }
+                co_await safe_close(client_fd);
+                co_return;
             }
-            if (n.error().value() == ENOBUFS && enobufs < MAX_ENOBUFS_RETRIES) {
-                ++enobufs;
-                co_await sleep_for(ENOBUFS_SLEEP);
-                continue;
-            }
-            co_await Close(client_fd);
-            co_return;
         }
 
         // --- Forward to backend via pool ---
         PooledConnection conn;
         if (!(co_await conn.acquire(pool))) {
-            co_await Close(client_fd);
+            co_await safe_close(client_fd);
             co_return;
         }
 
@@ -340,14 +645,14 @@ Task<void> proxy_session(int client_fd, ConnectionPool& pool,
 
             PooledConnection retry_conn;
             if (!(co_await retry_conn.acquire(pool))) {
-                co_await Close(client_fd);
+                co_await safe_close(client_fd);
                 co_return;
             }
             conn = std::move(retry_conn);
 
             ok = co_await forward_one(conn, total_req);
             if (!ok) {
-                co_await Close(client_fd);
+                co_await safe_close(client_fd);
                 co_return;
             }
         }
@@ -358,7 +663,7 @@ Task<void> proxy_session(int client_fd, ConnectionPool& pool,
         if (!request_keepalive(req)) break;
     }
 
-    co_await Close(client_fd);
+    co_await safe_close(client_fd);
 }
 
 // --- Proxy server ---
@@ -369,7 +674,11 @@ Task<void> proxy_server(int listen_port, const std::string& backend_host,
     const size_t max_conns = get_max_conns_from_env();
     const size_t max_buf = get_max_buf();
     const auto backend_timeout = get_backend_timeout();
+    const auto idle_timeout = get_idle_timeout();
     std::atomic<size_t> active_conns{0};
+
+    MemoryGuard memory_guard(get_mem_min_mb());
+    BackoffGate backoff_gate;
 
     ConnectionPool pool(env_cfg.connection_pool, backend_host, backend_port);
 
@@ -391,6 +700,13 @@ Task<void> proxy_server(int listen_port, const std::string& backend_host,
     int opt = 1;
     setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 
+    // Moderate socket buffers: small enough for low-memory servers but
+    // large enough to absorb bursts at high concurrency (8KB caused
+    // kernel-level drops at c>50; 16KB is the sweet spot).
+    int sndbuf = 16384, rcvbuf = 16384;
+    setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf));
+    setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
+
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
     addr.sin_port = htons(listen_port);
@@ -406,7 +722,10 @@ Task<void> proxy_server(int listen_port, const std::string& backend_host,
               << " -> " << backend_host << ":" << backend_port
               << " (max_pool_conns=" << env_cfg.connection_pool.max_connections
               << " max_client_conns=" << max_conns
-              << " threads=" << env_cfg.pool.num_threads << ")" << std::endl;
+              << " threads=" << env_cfg.pool.num_threads
+              << " max_buf=" << max_buf
+              << " idle_timeout_ms=" << idle_timeout.count()
+              << " mem_min_mb=" << memory_guard.min_free_mb << ")" << std::endl;
 
     // Exponential backoff state for accept loop.
     constexpr auto BACKOFF_MIN = std::chrono::milliseconds(1);
@@ -414,8 +733,22 @@ Task<void> proxy_server(int listen_port, const std::string& backend_host,
     auto backoff = BACKOFF_MIN;
 
     while (!shutdown.is_shutdown()) {
-        // Backpressure: throttle accept when SQ ring is saturated.
         auto* engine = IoUringEngine::current();
+
+        // P0: CQE overflow recovery — if CQEs were dropped, pending_ops
+        // is inflated. Sleep aggressively to let the system drain.
+        if (engine && engine->has_cq_overflow()) {
+            std::cerr << "[CQE_OVERFLOW] CQ ring overflow detected — backing off"
+                      << std::endl;
+            co_await sleep_for(std::chrono::milliseconds(100));
+            backoff = BACKOFF_MAX;
+            continue;
+        }
+
+        // P1: Decay BackoffGate when no retries are happening.
+        backoff_gate.maybe_decay();
+
+        // Backpressure: throttle accept when SQ ring is saturated.
         if (engine && engine->over_watermark()) {
             co_await sleep_for(backoff);
             backoff = std::min(backoff * 2, BACKOFF_MAX);
@@ -427,6 +760,12 @@ Task<void> proxy_server(int listen_port, const std::string& backend_host,
         if (cur >= max_conns) {
             co_await sleep_for(backoff);
             backoff = std::min(backoff * 2, BACKOFF_MAX);
+            continue;
+        }
+
+        // P0: Memory pressure — refuse new connections if memory is critical.
+        if (memory_guard.check()) {
+            co_await sleep_for(std::chrono::milliseconds(100));
             continue;
         }
 
@@ -446,16 +785,21 @@ Task<void> proxy_server(int listen_port, const std::string& backend_host,
         setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &opt, sizeof(opt));
         setsockopt(client_fd, IPPROTO_TCP, TCP_QUICKACK, &opt, sizeof(opt));
 
+        // Moderate per-connection socket buffers for low-memory servers.
+        setsockopt(client_fd, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf));
+        setsockopt(client_fd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
+
         active_conns.fetch_add(1, std::memory_order_relaxed);
 
         auto* sched = ExecutionContext::current();
         if (sched) {
             sched->submit(proxy_session(client_fd, pool, shutdown, active_conns,
-                                       max_buf, backend_timeout).release());
+                                       max_buf, backend_timeout, idle_timeout,
+                                       backoff_gate).release());
         }
     }
 
-    co_await Close(fd);
+    co_await safe_close(fd);
 
     auto stats = pool.snapshot();
     std::cout << "Proxy stopped. Pool: acquired=" << stats.acquired

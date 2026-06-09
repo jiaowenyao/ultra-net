@@ -41,6 +41,13 @@ public:
 
             m_on_completion(m_ctx, cqe);
         });
+
+        // CQE overflow recovery: if the CQ ring overflowed under load,
+        // some CQEs were dropped and pending_ops is now inflated.
+        // Halve it to allow the system to recover.
+        if (engine->has_cq_overflow()) {
+            engine->adjust_pending_ops_on_overflow();
+        }
     }
 
     // 提交所有待处理的 SQE 并等待 CQE

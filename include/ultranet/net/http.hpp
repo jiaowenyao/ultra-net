@@ -8,8 +8,30 @@
 #include <cstring>
 #include <algorithm>
 #include <cctype>
+#include <optional>
+#include <cerrno>
+#include <climits>
+#include <strings.h>
 
 namespace ynet::async::net::http {
+
+// Exception-free string-to-integer conversion.
+// std::stoll throws on malformed input — uncaught in coroutine context
+// this terminates the process.  safe_stoll wraps strtoll instead.
+inline std::optional<int64_t> safe_stoll(std::string_view sv) {
+    if (sv.empty()) return std::nullopt;
+    // strtoll requires null-termination; string_view is not guaranteed.
+    // Copy to a small stack buffer for the common case.
+    char buf[32];
+    size_t len = sv.size() < sizeof(buf) - 1 ? sv.size() : sizeof(buf) - 1;
+    std::memcpy(buf, sv.data(), len);
+    buf[len] = '\0';
+    char* end = nullptr;
+    errno = 0;
+    int64_t val = strtoll(buf, &end, 10);
+    if (errno == ERANGE || end == buf || *end != '\0') return std::nullopt;
+    return val;
+}
 
 enum class Method : uint8_t {
     GET = 0, POST, PUT, DELETE_,
@@ -182,7 +204,11 @@ struct HttpResponse {
         if (sp1 == std::string_view::npos) return 0;
         size_t sp2 = line.find(' ', sp1 + 1);
         http_version = line.substr(0, sp1);
-        status_code = std::stoi(std::string(line.substr(sp1 + 1, sp2 - sp1 - 1)));
+        {
+            auto code_sv = line.substr(sp1 + 1, sp2 - sp1 - 1);
+            auto sc = safe_stoll(code_sv);
+            status_code = sc.has_value() ? static_cast<int>(*sc) : 0;
+        }
         if (sp2 != std::string_view::npos) {
             status_message = line.substr(sp2 + 1);
         }
@@ -215,7 +241,8 @@ struct HttpResponse {
             std::transform(hl.begin(), hl.end(), hl.begin(),
                 [](unsigned char c) { return std::tolower(c); });
             if (hl == "content-length") {
-                content_length = std::stoll(h.value);
+                auto cl = safe_stoll(h.value);
+                content_length = cl.has_value() ? *cl : -1;
                 break;
             }
         }
@@ -250,10 +277,11 @@ struct HttpResponse {
 
     bool is_keepalive() const {
         auto v = header("connection");
-        std::string lowered(v);
-        for (auto& c : lowered)
-            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-        return lowered.find("keep-alive") != std::string::npos;
+        // Zero-allocation case-insensitive substring search for "keep-alive".
+        for (size_t i = 0; i + 10 <= v.size(); ++i) {
+            if (strncasecmp(v.data() + i, "keep-alive", 10) == 0) return true;
+        }
+        return false;
     }
 };
 
