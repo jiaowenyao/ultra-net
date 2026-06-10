@@ -68,4 +68,22 @@ target_link_libraries(actor_multi ultranet pthread)
 add_executable(actor_ps ../docs/examples/actor_ps.cc)
 target_link_libraries(actor_ps ultranet pthread)
 
+add_executable(actor_train ../docs/examples/actor_train.cc)
+target_link_libraries(actor_train ultranet pthread)
+
+add_executable(actor_async ../docs/examples/actor_async.cc)
+target_link_libraries(actor_async ultranet pthread)
+
+add_executable(actor_server ../docs/examples/actor_server.cc)
+target_link_libraries(actor_server ultranet pthread)
+
+add_executable(actor_client ../docs/examples/actor_client.cc)
+target_link_libraries(actor_client ultranet pthread)
+
 message(STATUS "Examples configured")
+
+
+
+add_executable(actor_v2_demo ../docs/examples/actor_v2_demo.cc)
+target_link_libraries(actor_v2_demo ultranet pthread)
+

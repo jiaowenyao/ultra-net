@@ -98,11 +98,13 @@ set(ULTRANET_PUBLIC_HEADERS
     include/ultranet/metrics/registry.hpp
     include/ultranet/log/logger.hpp
     include/ultranet/trace/span.hpp
-    include/ultranet/actor/api.h
-    include/ultranet/actor/core/message.h
-    include/ultranet/actor/core/mailbox.h
-    include/ultranet/actor/core/actor.h
+    include/ultranet/actor.hpp
+    include/ultranet/actor/core/actor_uri.h
+    include/ultranet/actor/core/base_actor.h
     include/ultranet/actor/core/actor_ref.h
+    include/ultranet/actor/system/actor_system.h
+    include/ultranet/actor/net/transport.h
+    include/ultranet/actor/net/cluster.h
 )
 
 add_library(ultranet ${ULTRANET_SOURCES} ${ULTRANET_PUBLIC_HEADERS})

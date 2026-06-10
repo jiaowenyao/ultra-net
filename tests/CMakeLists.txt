@@ -65,6 +65,12 @@ endforeach()
 message(STATUS "Tests configured: ${TEST_SOURCES}")
 
 # Actor framework test
-add_executable(actor_test actor_test.cc)
-target_link_libraries(actor_test PRIVATE ultranet pthread)
+
+
+add_executable(actor_v2_test actor_v2_test.cc)
+target_link_libraries(actor_v2_test PRIVATE ultranet pthread)
+
+
+add_executable(actor_cluster_test actor_cluster_test.cc)
+target_link_libraries(actor_cluster_test PRIVATE ultranet pthread)
 

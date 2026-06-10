@@ -1,7 +1,8 @@
 # Ultra-Net Actor Framework — 使用手册
 
-> 配套示例代码: `docs/examples/actor_hello.cc`, `actor_multi.cc`, `actor_ps.cc`
-> 构建: `cd build && make actor_hello actor_multi actor_ps`
+> 配套示例: `actor_hello` (基础), `actor_multi` (多Actor), `actor_async` (co_await),
+> `actor_ps` (参数服务器), `actor_train` (分布式训练)
+> 构建: `cd build && make actor_hello actor_multi actor_async actor_ps actor_train`
 
 ## 概述
 
@@ -95,6 +96,62 @@ auto ref = spawn<my_actor>(system, cfg);
 ref.send<&my_actor::handle_normal>(data);
 
 // 发送到高优先级邮箱（索引 1）— 需要扩展 API
+```
+
+## 协程支持 (co_await)
+
+Actor 方法通过 `call()` 返回 `Task<T>`，可以自然地用 `co_await` 等待结果：
+
+```cpp
+Task<void> orchestrate(actor_ref<calculator> calc) {
+    // co_await 等待 Actor 方法返回结果 — 读起来像同步代码
+    int sum = co_await calc.call<&calculator::add>(10, 20);
+    int product = co_await calc.call<&calculator::multiply>(sum, 3);
+    std::string greeting = co_await calc.call<&calculator::greet>("World");
+}
+```
+
+`call()` 与 `send()` 的区别：
+- `send()`: 异步发送，不等待结果（fire-and-forget）
+- `call()`: 返回 `Task<T>`，通过 `co_await` 等待结果
+
+> 示例: `docs/examples/actor_async.cc`
+
+## 分布式支持
+
+### 架构
+
+```cpp
+// 进程 A (server)
+auto sys = make_distributed(local_system, 17001, {.seed_nodes = {"127.0.0.1:17002"}});
+sys.start_serving(shutdown);
+auto ref = spawn<my_actor>(sys.local());
+// ref 现在可通过网络被其他进程访问
+
+// 进程 B (client)
+auto sys = make_distributed(local_system, 17002, {.seed_nodes = {"127.0.0.1:17001"}});
+sys.start_serving(shutdown);
+// 通过 gossip 协议自动发现进程 A 的节点和 actor
+```
+
+分布式组件：
+
+| 组件 | 文件 | 功能 |
+|------|------|------|
+| `cluster` | `dist/cluster.h` | Gossip 协议节点发现 |
+| `tcp_transport` | `dist/transport.h` | io_uring TCP 消息传输 |
+| `remote_actor_system` | `dist/remote.h` | 远程 Actor 代理路由 |
+| `serialization` | `dist/serialization.h` | 二进制消息序列化 |
+
+### 集群配置
+
+```cpp
+dist::cluster_config cfg;
+cfg.listen_addr = "0.0.0.0";
+cfg.listen_port = 17001;
+cfg.seed_nodes = {"192.168.1.100:17001"};  // 初始联络节点
+cfg.gossip_interval_ms = 500;               // gossip 间隔
+cfg.heartbeat_timeout_ms = 3000;             // 心跳超时
 ```
 
 ## 高级用法
