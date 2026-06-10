@@ -63,3 +63,8 @@ foreach(test_src ${TEST_SOURCES})
 endforeach()
 
 message(STATUS "Tests configured: ${TEST_SOURCES}")
+
+# Actor framework test
+add_executable(actor_test actor_test.cc)
+target_link_libraries(actor_test PRIVATE ultranet pthread)
+

@@ -58,4 +58,14 @@ target_link_libraries(websocket_echo_server ultranet pthread)
 add_executable(websocket_echo_client ../docs/examples/websocket_echo_client.cc)
 target_link_libraries(websocket_echo_client ultranet pthread)
 
+# Actor framework examples (docs examples)
+add_executable(actor_hello ../docs/examples/actor_hello.cc)
+target_link_libraries(actor_hello ultranet pthread)
+
+add_executable(actor_multi ../docs/examples/actor_multi.cc)
+target_link_libraries(actor_multi ultranet pthread)
+
+add_executable(actor_ps ../docs/examples/actor_ps.cc)
+target_link_libraries(actor_ps ultranet pthread)
+
 message(STATUS "Examples configured")

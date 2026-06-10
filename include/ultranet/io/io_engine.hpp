@@ -57,12 +57,8 @@ public:
     // 作用域守卫
     class Scope {
     public:
-        explicit Scope(const Config& config = Config{}) {
-            init_thread_local(config);
-        }
-        ~Scope() {
-            destroy_thread_local();
-        }
+        explicit Scope(const Config& config = Config{});
+        ~Scope();  // defined in src/io_engine.cc (needs full IoUringEngine)
         Scope(const Scope&) = delete;
         Scope& operator=(const Scope&) = delete;
         Scope(Scope&&) = delete;

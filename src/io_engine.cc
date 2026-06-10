@@ -26,4 +26,11 @@ void* IoUringEngine::get_buffer(unsigned gid, unsigned bid) noexcept {
     return nullptr;
 }
 
+IoUringEngine::Scope::Scope(const IoUringEngine::Config& config) {
+    IoUringEngine::init_thread_local(config);
+}
+IoUringEngine::Scope::~Scope() {
+    IoUringEngine::destroy_thread_local();
+}
+
 } // namespace ynet::async::io
