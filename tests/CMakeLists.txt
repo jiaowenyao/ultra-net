@@ -74,3 +74,15 @@ target_link_libraries(actor_v2_test PRIVATE ultranet pthread)
 add_executable(actor_cluster_test actor_cluster_test.cc)
 target_link_libraries(actor_cluster_test PRIVATE ultranet pthread)
 
+
+add_executable(actor_message_test actor_message_test.cc)
+target_link_libraries(actor_message_test PRIVATE ultranet pthread)
+
+add_executable(actor_cluster_unit_test actor_cluster_test.cc)
+target_link_libraries(actor_cluster_unit_test PRIVATE ultranet pthread)
+
+add_executable(core_mpsc_test core_mpsc_test.cc)
+target_link_libraries(core_mpsc_test PRIVATE ultranet pthread)
+
+add_executable(core_pool_test core_pool_test.cc)
+target_link_libraries(core_pool_test PRIVATE ultranet pthread)

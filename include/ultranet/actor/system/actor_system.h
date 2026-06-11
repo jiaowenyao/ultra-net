@@ -139,8 +139,10 @@ inline actor_system::actor_system(const system_config& cfg) : m_cfg(cfg) {
 }
 
 inline actor_system::~actor_system() {
-    // Wait for pending work before destroying actors.
-    m_pool->wait_all();
+    // Signal the pool to stop and wait briefly for cleanup.
+    // In a production server, run() would block until shutdown is signaled.
+    // For tests and short-lived programs, we need to exit cleanly.
+    m_pool.reset();  // triggers ~WorkStealingThreadPool (joins threads)
 }
 
 } // namespace ynet::actor

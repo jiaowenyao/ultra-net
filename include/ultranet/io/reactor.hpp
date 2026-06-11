@@ -50,12 +50,14 @@ public:
         }
     }
 
-    // 提交所有待处理的 SQE 并等待 CQE
+    // Submit pending SQEs and wait for at least one CQE.
+    // Uses a 100ms timeout so that shutdown checks happen promptly.
+    // (Previously 5s — caused pool destruction to hang in tests.)
     void wait_for_events() {
         auto* engine = IoUringEngine::current();
         if (!engine) return;
         engine->flush_submit();
-        struct __kernel_timespec ts = {5, 0};
+        struct __kernel_timespec ts = {0, 100000000};  // 100ms
         io_uring_cqe* cqe = nullptr;
         engine->wait_cqe(&cqe, 1, &ts);
     }
