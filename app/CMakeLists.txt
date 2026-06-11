@@ -6,5 +6,6 @@ add_subdirectory(redis-proxy)
 add_subdirectory(http-proxy)
 add_subdirectory(backend)
 add_subdirectory(data-collector)
+add_subdirectory(dist-bench)
 
 message(STATUS "Apps configured")

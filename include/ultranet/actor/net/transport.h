@@ -1,74 +1,181 @@
 // io_uring TCP transport — completely hidden from users.
-// Handles connections, framing, and message dispatch.
+// Handles connections, framing, message dispatch, and TCP tuning.
 #pragma once
+
 #include <unordered_map>
 #include <string>
 #include <functional>
+#include <memory>
+
 #include "ultranet/ultranet.h"
 #include "ultranet/lifecycle/shutdown.hpp"
 
 namespace ynet::actor::net {
 
-using namespace ynet::async; using namespace ynet::async::io;
-using namespace ynet::async::net; using namespace ynet::async::lifecycle;
+using namespace ynet::async;
+using namespace ynet::async::io;
+using namespace ynet::async::net;
+using namespace ynet::async::lifecycle;
+
 using msg_handler_t = std::function<Task<void>(std::vector<uint8_t>)>;
 
-struct outbound_conn {
-    TcpSocket sock; bool valid=true;
-    outbound_conn(TcpSocket s):sock(std::move(s)){}
-    Task<void> send(const std::vector<uint8_t>& d){
-        uint32_t l=(uint32_t)d.size(); auto w=co_await sock.write(&l,4);
-        if(!w){valid=false;co_return;}
-        size_t n=0; while(n<d.size()){auto w2=co_await sock.write(d.data()+n,d.size()-n);if(!w2){valid=false;co_return;}n+=*w2;}
-    }
+// Apply performance-oriented TCP socket options.
+// Called automatically on every accepted and connected socket.
+inline void apply_tcp_tuning(int fd) {
+    int buf_size = 256 * 1024;
+    setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &buf_size, sizeof(buf_size));
+    setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &buf_size, sizeof(buf_size));
+
+    int opt = 1;
+    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &opt, sizeof(opt));
+}
+
+// Pre-allocated receive buffer for zero-allocation message handling.
+// The actor framework uses this to avoid per-message heap allocations.
+struct recv_buffer {
+    static constexpr size_t k_default_size = 256 * 1024;
+    std::unique_ptr<uint8_t[]> data;
+
+    recv_buffer() : data(std::make_unique<uint8_t[]>(k_default_size)) {}
+    explicit recv_buffer(size_t size) : data(std::make_unique<uint8_t[]>(size)) {}
 };
 
+// Outbound connection to a peer node.
+class outbound_conn {
+public:
+    TcpSocket m_sock;
+    bool m_valid = true;
+
+    explicit outbound_conn(TcpSocket s) : m_sock(std::move(s)) {}
+
+    Task<void> send(const std::vector<uint8_t>& payload) {
+        uint32_t length = static_cast<uint32_t>(payload.size());
+        auto write_result = co_await m_sock.write(&length, sizeof(length));
+        if (!write_result) {
+            m_valid = false;
+            co_return;
+        }
+        size_t offset = 0;
+        while (offset < payload.size()) {
+            auto chunk_result = co_await m_sock.write(
+                payload.data() + offset, payload.size() - offset);
+            if (!chunk_result) {
+                m_valid = false;
+                co_return;
+            }
+            offset += *chunk_result;
+        }
+    }
+
+    bool is_valid() const { return m_valid && m_sock.is_valid(); }
+    void close() { m_sock.close(); }
+};
+
+// TCP transport: listens for connections and dispatches framed messages.
 class tcp_transport {
 public:
     tcp_transport(uint16_t port, msg_handler_t handler)
-        : m_port(port), m_handler(std::move(handler)) {}
+        : m_port(port)
+        , m_handler(std::move(handler)) {}
 
     uint16_t port() const { return m_port; }
 
-    Task<void> serve(ShutdownCoordinator& sd) {
-        auto sock = co_await Socket(AF_INET, SOCK_STREAM, 0); int fd = *sock;
-        int opt=1; setsockopt(fd,SOL_SOCKET,SO_REUSEADDR,&opt,sizeof(opt));
-        sockaddr_in addr{}; addr.sin_family=AF_INET; addr.sin_port=htons(m_port);
-        addr.sin_addr.s_addr=INADDR_ANY;
-        co_await Bind(fd,(sockaddr*)&addr,sizeof(addr)); co_await Listen(fd,64);
-        std::cout << "[transport] :" << m_port << std::endl;
-        while(!sd.is_shutdown()){
-            Accept a(fd); a.with_timeout(std::chrono::milliseconds(100));
-            auto c=co_await a; if(!c)continue;
-            int cfd=*c;
-            auto* s=ExecutionContext::current();
-            if(s)s->submit(handle_conn(cfd).release());
+    // Start the accept loop.  Runs as a coroutine.
+    Task<void> serve(ShutdownCoordinator& shutdown) {
+        auto sock_result = co_await Socket(AF_INET, SOCK_STREAM, 0);
+        if (!sock_result) {
+            co_return;
         }
-        co_await Close(fd);
+        int listen_fd = *sock_result;
+
+        int opt = 1;
+        setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+        sockaddr_in server_addr{};
+        server_addr.sin_family      = AF_INET;
+        server_addr.sin_port        = htons(m_port);
+        server_addr.sin_addr.s_addr = INADDR_ANY;
+
+        co_await Bind(listen_fd, reinterpret_cast<sockaddr*>(&server_addr),
+                      sizeof(server_addr));
+        co_await Listen(listen_fd, 64);
+
+        std::cout << "[transport] listening on :" << m_port << std::endl;
+
+        while (!shutdown.is_shutdown()) {
+            Accept acceptor(listen_fd);
+            acceptor.with_timeout(std::chrono::milliseconds(100));
+
+            auto client_result = co_await acceptor;
+            if (!client_result) {
+                continue;
+            }
+
+            int client_fd = *client_result;
+            apply_tcp_tuning(client_fd);
+
+            auto* scheduler = ExecutionContext::current();
+            if (scheduler) {
+                scheduler->submit(handle_connection(client_fd).release());
+            }
+        }
+
+        co_await Close(listen_fd);
     }
 
-    Task<std::shared_ptr<outbound_conn>> connect(const std::string& host, uint16_t port) {
-        auto sock = co_await TcpSocket::connect(host,port,std::chrono::seconds(2));
-        if(!sock.is_valid()) co_return nullptr;
-        int fd=sock.fd(); int o=1; setsockopt(fd,IPPROTO_TCP,TCP_NODELAY,&o,sizeof(o));
+    // Connect to a remote node.
+    Task<std::shared_ptr<outbound_conn>> connect(
+            const std::string& host, uint16_t port) {
+        auto sock = co_await TcpSocket::connect(
+            host, port, std::chrono::seconds(3));
+        if (!sock.is_valid()) {
+            co_return nullptr;
+        }
+        apply_tcp_tuning(sock.fd());
         co_return std::make_shared<outbound_conn>(std::move(sock));
     }
 
 private:
-    uint16_t m_port; msg_handler_t m_handler;
+    uint16_t m_port;
+    msg_handler_t m_handler;
 
-    Task<void> handle_conn(int cfd) {
-        uint32_t len;
-        while(true){
-            Read r(cfd,&len,4); r.with_timeout(std::chrono::seconds(30));
-            auto rr=co_await r; if(!rr||*rr<4)break;
-            std::vector<uint8_t> buf(len);
-            size_t n=0;
-            while(n<len){ Read r2(cfd,buf.data()+n,len-n); r2.with_timeout(std::chrono::seconds(10));
-                auto rr2=co_await r2; if(!rr2||*rr2==0){co_await Close(cfd);co_return;} n+=*rr2; }
-            co_await m_handler(std::move(buf));
+    // Handle one inbound connection: read length-prefixed messages.
+    Task<void> handle_connection(int client_fd) {
+        while (true) {
+            // Read 4-byte length prefix.
+            uint32_t message_length = 0;
+            Read length_reader(client_fd, &message_length, sizeof(message_length));
+            length_reader.with_timeout(std::chrono::seconds(30));
+
+            auto read_result = co_await length_reader;
+            if (!read_result || *read_result < (ssize_t)sizeof(message_length)) {
+                break;
+            }
+
+            if (message_length == 0 || message_length > 100 * 1024 * 1024) {
+                break;
+            }
+
+            // Read payload.
+            std::vector<uint8_t> payload(message_length);
+            size_t offset = 0;
+            while (offset < message_length) {
+                Read payload_reader(client_fd, payload.data() + offset,
+                                    message_length - offset);
+                payload_reader.with_timeout(std::chrono::seconds(10));
+
+                auto chunk_result = co_await payload_reader;
+                if (!chunk_result || *chunk_result == 0) {
+                    co_await Close(client_fd);
+                    co_return;
+                }
+                offset += *chunk_result;
+            }
+
+            co_await m_handler(std::move(payload));
         }
-        co_await Close(cfd);
+
+        co_await Close(client_fd);
     }
 };
 
