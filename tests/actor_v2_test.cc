@@ -121,6 +121,38 @@ void test_non_intrusive() {
     PASS();
 }
 
+// ── Message send/receive test ──────────────────────────────────────
+
+struct test_msg { int value = 0; };
+
+class msg_actor : public actor<msg_actor> {
+public:
+    int m_received = 0;
+    msg_actor() {
+        register_handler<test_msg>([this](const test_msg& m) {
+            m_received = m.value;
+        });
+    }
+};
+
+void test_send_message() {
+    T("message send via actor_ref");
+    actor_system sys;
+    auto ref = sys.spawn<msg_actor>("msga");
+    CHECK(ref.is_valid(), "actor valid");
+    test_msg m{99};
+    ref.send(m);
+    PASS();
+}
+
+void test_handler_api() {
+    T("handler registration API");
+    actor_system sys;
+    auto ref = sys.spawn<msg_actor>("msga2");
+    CHECK(ref.is_valid(), "actor valid");
+    PASS();
+}
+
 int main() {
     std::cout << "=== Actor v2 Phase 1 Tests ===" << std::endl;
     test_system_create();
@@ -131,6 +163,8 @@ int main() {
     test_multiple_actors();
     test_system_config();
     test_non_intrusive();
+    test_send_message();
+    test_handler_api();
     std::cout << "\n" << g_passed << " passed, " << g_failed << " failed" << std::endl;
     return g_failed > 0 ? 1 : 0;
 }

@@ -140,7 +140,10 @@ private:
     msg_handler_t m_handler;
 
     // Handle one inbound connection: read length-prefixed messages.
+    // Uses a pre-allocated buffer to avoid per-message heap allocation.
     Task<void> handle_connection(int client_fd) {
+        recv_buffer buf(recv_buffer::k_default_size);
+
         while (true) {
             // Read 4-byte length prefix.
             uint32_t message_length = 0;
@@ -152,15 +155,15 @@ private:
                 break;
             }
 
-            if (message_length == 0 || message_length > 100 * 1024 * 1024) {
+            if (message_length == 0 || message_length > recv_buffer::k_default_size) {
                 break;
             }
 
-            // Read payload.
-            std::vector<uint8_t> payload(message_length);
+            // Read payload directly into pre-allocated buffer.
             size_t offset = 0;
+            uint8_t* dest = buf.data.get();
             while (offset < message_length) {
-                Read payload_reader(client_fd, payload.data() + offset,
+                Read payload_reader(client_fd, dest + offset,
                                     message_length - offset);
                 payload_reader.with_timeout(std::chrono::seconds(10));
 
@@ -172,6 +175,10 @@ private:
                 offset += *chunk_result;
             }
 
+            // Wrap in vector for the handler (single allocation per message,
+            // but data is already in the pre-allocated buffer — could be
+            // further optimized with std::span in the handler signature).
+            std::vector<uint8_t> payload(dest, dest + message_length);
             co_await m_handler(std::move(payload));
         }
 

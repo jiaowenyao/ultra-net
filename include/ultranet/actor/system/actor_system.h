@@ -28,21 +28,6 @@ struct system_config {
     std::vector<std::string> seed_nodes;
 };
 
-// ── Local actor proxy (direct dispatch, no serialization) ─────────────
-
-template <typename T>
-class local_actor_proxy : public actor_proxy {
-public:
-    local_actor_proxy(actor_base* a, actor_system* sys) : m_actor(a), m_sys(sys) {}
-    void send(const void* data, size_t len) override {
-        m_actor->deliver(0, data, len);
-    }
-    const actor_uri& uri() const override { return m_actor->uri(); }
-private:
-    actor_base* m_actor;
-    actor_system* m_sys;
-};
-
 // ── Actor system ───────────────────────────────────────────────────────
 
 class actor_system {
