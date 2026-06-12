@@ -8,15 +8,19 @@
 #include <functional>
 #include <vector>
 #include <cstring>
+#include <atomic>
+#include <unordered_map>
 
 #include "ultranet/actor/core/actor_uri.h"
+#include "ultranet/actor/core/type_hash.h"
+#include "ultranet/actor/core/mailbox.h"
 
 namespace ynet::actor {
 
 class actor_system;
 template <typename T> class actor_ref;
 
-// ── Message envelope for type-safe dispatch ────────────────────────────
+// ── Message handler type ────────────────────────────────────────────────
 
 using message_handler_t = std::function<void(const void* data, size_t len)>;
 
@@ -30,15 +34,23 @@ public:
     void set_uri(const actor_uri& u) { m_uri = u; }
     void set_system(actor_system* s) { m_system = s; }
 
+    // Set the scheduling callback used by try_activate().
+    // Called by actor_system during spawn() to wire up the thread pool.
+    void set_schedule_fn(std::function<void(std::function<void()>)> fn) {
+        m_schedule_fn = std::move(fn);
+    }
+
     const actor_uri& uri() const { return m_uri; }
     actor_system* system() const { return m_system; }
     std::string name() const { return m_uri.name; }
+
+    // ── Handler registration ───────────────────────────────────────────
 
     // Register a handler for a specific message type.
     // Usage: register_handler<my_msg>([](const my_msg& m) { ... });
     template <typename Msg>
     void register_handler(std::function<void(const Msg&)> handler) {
-        uint64_t hash = type_hash<Msg>();
+        uint64_t hash = actor_type_hash<Msg>();
         m_handlers[hash] = [handler = std::move(handler)](const void* data, size_t len) {
             if (len >= sizeof(Msg)) {
                 const Msg* msg = static_cast<const Msg*>(data);
@@ -48,6 +60,7 @@ public:
     }
 
     // Deliver a message to this actor by type hash.
+    // Called from pull_and_run() on the thread pool.
     virtual void deliver(uint64_t msg_type, const void* data, size_t len) {
         auto it = m_handlers.find(msg_type);
         if (it != m_handlers.end()) {
@@ -58,8 +71,28 @@ public:
     // Check if a handler is registered for the given type.
     template <typename Msg>
     bool handles() const {
-        return m_handlers.find(type_hash<Msg>()) != m_handlers.end();
+        return m_handlers.find(actor_type_hash<Msg>()) != m_handlers.end();
     }
+
+    // ── Async mailbox interface ────────────────────────────────────────
+
+    // Push a pre-built envelope into the mailbox and try to activate.
+    // Called by local_actor_proxy::deliver() (and eventually by the
+    // inbound network handler for remote messages).
+    void push_envelope(message_envelope env);
+
+    // Pull messages from the mailbox and dispatch them.
+    // Runs on the thread pool.  Returns true if any messages were processed.
+    bool pull_and_run();
+
+    // Activate this actor: schedule pull_and_run() on the thread pool.
+    // Uses CAS to guarantee only one execution instance at a time.
+    void try_activate();
+
+    // Accessors for the mailbox (used by proxies and integration tests).
+    mailbox& get_mailbox() { return m_mailbox; }
+    size_t pending() const { return m_pending.load(std::memory_order_acquire); }
+    void set_max_per_activation(size_t n) { m_max_per_activation = n; }
 
 protected:
     actor_uri m_uri;
@@ -67,16 +100,52 @@ protected:
 
 private:
     std::unordered_map<uint64_t, message_handler_t> m_handlers;
-
-    template <typename T>
-    static uint64_t type_hash() {
-        // Use a simple compile-time hash based on type name.
-        const char* name = typeid(T).name();
-        uint64_t h = 14695981039346656037ULL;
-        while (*name) { h ^= (uint8_t)*name++; h *= 1099511628211ULL; }
-        return h;
-    }
+    mailbox m_mailbox;
+    std::function<void(std::function<void()>)> m_schedule_fn;
+    std::atomic<bool> m_activated{false};
+    std::atomic<size_t> m_pending{0};
+    size_t m_max_per_activation = 64;
 };
+
+// ── Inline definitions (require actor_system forward decl) ─────────────
+
+inline void actor_base::push_envelope(message_envelope env) {
+    while (!m_mailbox.try_push(std::move(env))) {
+        std::this_thread::yield();
+    }
+    m_pending.fetch_add(1, std::memory_order_release);
+    try_activate();
+}
+
+inline bool actor_base::pull_and_run() {
+    size_t limit = std::min(m_max_per_activation,
+                            m_pending.load(std::memory_order_acquire));
+    auto handler = [this](message_envelope env) {
+        deliver(env.msg_type, env.data.data(), env.data.size());
+    };
+    size_t executed = m_mailbox.drain(handler, limit);
+    if (executed > 0) {
+        m_pending.fetch_sub(executed, std::memory_order_release);
+    }
+    m_activated.store(false, std::memory_order_release);
+    // Self-reactivation: more messages may have arrived during processing.
+    if (m_pending.load(std::memory_order_acquire) > 0) {
+        try_activate();
+    }
+    return executed > 0;
+}
+
+inline void actor_base::try_activate() {
+    bool expected = false;
+    if (m_activated.compare_exchange_strong(expected, true,
+            std::memory_order_acq_rel)) {
+        if (m_schedule_fn) {
+            m_schedule_fn([this]() {
+                pull_and_run();
+            });
+        }
+    }
+}
 
 // ── CRTP actor base ────────────────────────────────────────────────────
 

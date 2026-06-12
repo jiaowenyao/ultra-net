@@ -8,8 +8,9 @@
 #include <cstring>
 #include <functional>
 
-#include "ultranet/coroutine/task.hpp"
 #include "ultranet/actor/core/actor_uri.h"
+#include "ultranet/actor/core/type_hash.h"
+#include "ultranet/actor/core/mailbox.h"
 
 namespace ynet::actor {
 
@@ -23,38 +24,40 @@ public:
     virtual ~actor_proxy() = default;
     virtual void deliver(uint64_t msg_type, const void* data, size_t len) = 0;
     virtual const actor_uri& uri() const = 0;
+    virtual actor_base* local_actor() { return nullptr; }
 };
 
-// ── Local actor proxy: direct dispatch, zero serialization overhead ───
+// ── Local actor proxy: pushes to mailbox and activates actor ──────────
+// Zero serialization overhead — message is copied into a message_envelope
+// and pushed directly into the actor's mailbox.
 
-template <typename T>
 class local_actor_proxy : public actor_proxy {
 public:
     local_actor_proxy(actor_base* a, actor_system* sys)
         : m_actor(a), m_system(sys) {}
 
     void deliver(uint64_t msg_type, const void* data, size_t len) override {
-        m_actor->deliver(msg_type, data, len);
+        message_envelope env;
+        env.msg_type = msg_type;
+        env.data.assign(static_cast<const uint8_t*>(data),
+                        static_cast<const uint8_t*>(data) + len);
+        if (m_actor) {
+            m_actor->push_envelope(std::move(env));
+        }
     }
 
     const actor_uri& uri() const override {
         return m_actor->uri();
     }
 
+    actor_base* local_actor() override {
+        return m_actor;
+    }
+
 private:
     actor_base* m_actor;
     actor_system* m_system;
 };
-
-// ── Compile-time type hash ─────────────────────────────────────────────
-
-template <typename T>
-inline uint64_t actor_type_hash() {
-    const char* name = typeid(T).name();
-    uint64_t h = 14695981039346656037ULL;
-    while (*name) { h ^= (uint8_t)*name++; h *= 1099511628211ULL; }
-    return h;
-}
 
 // ── Type-safe actor reference ─────────────────────────────────────────
 
@@ -69,8 +72,8 @@ public:
     const actor_uri& uri() const { return m_uri; }
     std::string name() const { return m_uri.name; }
 
-    // Fire-and-forget: push a message to the actor's mailbox.
-    // The message is delivered asynchronously via the framework.
+    // Fire-and-forget: push a message into the actor's mailbox.
+    // The message is delivered asynchronously via the thread pool.
     template <typename Msg>
     void send(const Msg& msg) {
         if (m_proxy) {

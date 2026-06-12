@@ -78,6 +78,15 @@ target_link_libraries(actor_cluster_test PRIVATE ultranet pthread)
 add_executable(actor_message_test actor_message_test.cc)
 target_link_libraries(actor_message_test PRIVATE ultranet pthread)
 
+add_executable(actor_mailbox_test actor_mailbox_test.cc)
+target_link_libraries(actor_mailbox_test PRIVATE ultranet pthread)
+
+add_executable(actor_serialization_test actor_serialization_test.cc)
+target_link_libraries(actor_serialization_test PRIVATE ultranet pthread)
+
+add_executable(actor_system_integration_test actor_system_integration_test.cc)
+target_link_libraries(actor_system_integration_test PRIVATE ultranet pthread)
+
 add_executable(actor_cluster_unit_test actor_cluster_test.cc)
 target_link_libraries(actor_cluster_unit_test PRIVATE ultranet pthread)
 

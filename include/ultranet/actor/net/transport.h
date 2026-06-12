@@ -74,33 +74,61 @@ public:
 // TCP transport: listens for connections and dispatches framed messages.
 class tcp_transport {
 public:
+    // Constructor: bind to a port (used by standalone transport).
     tcp_transport(uint16_t port, msg_handler_t handler)
         : m_port(port)
         , m_handler(std::move(handler)) {}
 
+    // Constructor: use a pre-bound listen fd (used by actor_system
+    // which handles binding synchronously before starting serve()).
+    tcp_transport(int listen_fd, uint16_t actual_port, msg_handler_t handler)
+        : m_listen_fd(listen_fd)
+        , m_port(actual_port)
+        , m_owns_fd(false)
+        , m_handler(std::move(handler)) {}
+
     uint16_t port() const { return m_port; }
+    uint16_t actual_port() const { return m_port; }
 
     // Start the accept loop.  Runs as a coroutine.
+    // If m_listen_fd is already set (pre-bound constructor), use it directly.
     Task<void> serve(ShutdownCoordinator& shutdown) {
-        auto sock_result = co_await Socket(AF_INET, SOCK_STREAM, 0);
-        if (!sock_result) {
-            co_return;
+        int listen_fd = m_listen_fd;
+
+        if (listen_fd < 0) {
+            auto sock_result = co_await Socket(AF_INET, SOCK_STREAM, 0);
+            if (!sock_result) {
+                co_return;
+            }
+            listen_fd = *sock_result;
+            m_listen_fd = listen_fd;
+            m_owns_fd = true;
+
+            int opt = 1;
+            setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+            sockaddr_in server_addr{};
+            server_addr.sin_family      = AF_INET;
+            server_addr.sin_port        = htons(m_port);
+            server_addr.sin_addr.s_addr = INADDR_ANY;
+
+            co_await Bind(listen_fd, reinterpret_cast<sockaddr*>(&server_addr),
+                          sizeof(server_addr));
+            co_await Listen(listen_fd, 64);
+
+            // Store the actual bound port.
+            sockaddr_in bound{};
+            socklen_t bound_len = sizeof(bound);
+            if (getsockname(listen_fd, reinterpret_cast<sockaddr*>(&bound),
+                           &bound_len) == 0) {
+                m_port = ntohs(bound.sin_port);
+            }
+
+            std::cout << "[transport] listening on :" << m_port << std::endl;
+        } else {
+            std::cout << "[transport] serving on pre-bound fd:" << listen_fd
+                      << " port:" << m_port << std::endl;
         }
-        int listen_fd = *sock_result;
-
-        int opt = 1;
-        setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-
-        sockaddr_in server_addr{};
-        server_addr.sin_family      = AF_INET;
-        server_addr.sin_port        = htons(m_port);
-        server_addr.sin_addr.s_addr = INADDR_ANY;
-
-        co_await Bind(listen_fd, reinterpret_cast<sockaddr*>(&server_addr),
-                      sizeof(server_addr));
-        co_await Listen(listen_fd, 64);
-
-        std::cout << "[transport] listening on :" << m_port << std::endl;
 
         while (!shutdown.is_shutdown()) {
             Accept acceptor(listen_fd);
@@ -120,7 +148,11 @@ public:
             }
         }
 
-        co_await Close(listen_fd);
+        if (m_owns_fd) {
+            co_await Close(listen_fd);
+        } else {
+            ::close(listen_fd);
+        }
     }
 
     // Connect to a remote node.
@@ -136,6 +168,8 @@ public:
     }
 
 private:
+    int m_listen_fd = -1;
+    bool m_owns_fd = true;
     uint16_t m_port;
     msg_handler_t m_handler;
 

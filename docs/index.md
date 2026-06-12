@@ -93,7 +93,10 @@ int main() {
 | [HTTP 编程指南](http-guide.md) | HTTP 请求解析、响应构建、HTTP 客户端 |
 | [WebSocket 编程指南](websocket-guide.md) | WebSocket 握手、帧编解码、echo 示例 |
 | [高级特性](advanced-features.md) | Channel, when_all, 重试, 断路器, 服务发现等 |
+| [Actor 框架指南](actor-guide.md) | Actor 概念详解（URI/Ref/System/Gossip）、开发指南、注意事项 |
 | [API 参考](api-reference.md) | 完整 API 索引和类型签名 |
+| [Training Dashboard — 架构与开发指南](training-dashboard-architecture.md) | MVVM 架构设计、数据流、扩展指南、常见陷阱 |
+| [Training Dashboard — 用户手册](training-dashboard-user-guide.md) | Dashboard 使用说明、面板详解、故障排查 |
 
 ### 命名空间约定
 
