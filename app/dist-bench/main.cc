@@ -13,6 +13,7 @@
 //   large   — large message stress test
 
 #include "ultranet/ultranet.h"
+#include "ultranet/actor/system/metrics_exporter.h"
 
 #include <iostream>
 #include <iomanip>
@@ -27,6 +28,7 @@
 #include <numeric>
 #include <mutex>
 #include <sys/resource.h>
+#include <thread>
 
 using namespace ynet::async;
 using namespace ynet::async::io;
@@ -262,8 +264,66 @@ Task<void> tcp_handle_client(int client_fd, tcp_ps_state& state) {
     co_await Close(client_fd);
 }
 
+// ── Worker coroutine: connect to PS, send gradients, wait for acks ──────
+// Defined as a plain function (not lambda) to avoid GCC 13.2 coroutine
+// lambda capture corruption.  Parameters are passed by value.
+Task<void> tcp_worker_run(int worker_id, uint16_t ps_port,
+                          size_t num_params, int steps_per_worker) {
+    // Retry loop: the PS accept loop may take a moment to start.
+    int fd = -1;
+    for (int retry = 0; retry < 3 && fd < 0; ++retry) {
+        try {
+            auto sock = co_await TcpSocket::connect(
+                "127.0.0.1", ps_port, std::chrono::seconds(5));
+            fd = sock.release();
+        } catch (const std::system_error&) {
+            // connect failed — sleep and retry.
+        }
+        if (fd < 0) {
+            co_await sleep_for(std::chrono::milliseconds(500));
+        }
+    }
+    if (fd < 0) {
+        co_return;
+    }
+    tune_tcp(fd);
+
+    auto grads = std::make_unique<float[]>(num_params);
+    for (size_t j = 0; j < num_params; ++j) {
+        grads[j] = 0.1f + (static_cast<float>(worker_id) * 0.01f);
+    }
+    size_t vec_bytes = num_params * sizeof(float);
+
+    for (int step = 0; step < steps_per_worker; ++step) {
+        co_await Write(fd, grads.get(), vec_bytes);
+        uint8_t ack = 0;
+        Read r(fd, &ack, 1);
+        r.with_timeout(std::chrono::seconds(5));
+        auto rr = co_await r;
+        if (!rr || *rr < 1) {
+            break;
+        }
+    }
+    co_await Close(fd);
+}
+
+// ── Benchmark result (populated by tcp_ps_main) ──────────────────────
+
+struct bench_result {
+    int      total_steps   = 0;
+    int64_t  total_bytes   = 0;
+    uint32_t checksum      = 0;
+    double   throughput_mbps = 0.0;
+    double   latency_p50_ms  = 0.0;
+    double   latency_p99_ms  = 0.0;
+    int      connected_workers = 0;
+};
+
 Task<void> tcp_ps_main(uint16_t port, int expected_workers,
-                        size_t num_params, int steps_per_worker) {
+                        size_t num_params, int steps_per_worker,
+                        int metrics_port = 0,
+                        bool keep_metrics_alive = false,
+                        bench_result* result = nullptr) {
     tcp_ps_state state;
     state.param_count = num_params;
     state.weights = std::make_unique<float[]>(num_params);
@@ -283,6 +343,118 @@ Task<void> tcp_ps_main(uint16_t port, int expected_workers,
     co_await Listen(listen_fd, expected_workers * 2);
 
     state.m.cpu_start = cpu_snapshot::now();
+
+    // Hints for the metrics exporter — updated as the PS runs.
+    int connected_hint = 0;
+    auto t_xfer_start_hint = std::chrono::steady_clock::now();
+
+    // ── Metrics exporter (optional) ────────────────────────────────
+    auto exporter = std::make_shared<ynet::actor::metrics_exporter>();
+
+    if (metrics_port > 0) {
+        // Nodes endpoint: PS + worker list.
+        exporter->set_nodes_provider([&]() -> std::string {
+            std::vector<std::pair<std::string, uint16_t>> workers;
+            std::vector<bool> online;
+            for (int i = 0; i < expected_workers; ++i) {
+                workers.emplace_back("127.0.0.1", static_cast<uint16_t>(0));
+                online.push_back(true);
+            }
+            return ynet::actor::build_nodes_json(
+                "127.0.0.1", port, workers, online);
+        });
+
+        // Training endpoint: snapshot of bench_metrics.
+        exporter->set_training_provider([&]() -> std::string {
+            ynet::actor::training_snapshot_data snap;
+            snap.timestamp_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count();
+            snap.total_steps   = static_cast<int>(state.m.total_steps.load());
+            snap.total_bytes   = static_cast<int64_t>(state.m.total_bytes.load());
+            snap.latency_p50_ms = state.m.latency.p50();
+            snap.latency_p99_ms = state.m.latency.p99();
+            snap.checksum = state.m.checksum.load();
+            snap.num_workers = expected_workers;
+
+            // Calculate throughput since start.
+            auto now = std::chrono::steady_clock::now();
+            double elapsed_s = std::chrono::duration<double>(
+                now - t_xfer_start_hint).count();
+            if (elapsed_s > 0.001) {
+                double data_mb = state.m.total_bytes.load() / 1024.0 / 1024.0;
+                snap.throughput_mbps = data_mb / elapsed_s;
+            }
+
+            // Per-worker data (aggregated — we don't track per-worker in TCP mode).
+            for (int i = 0; i < expected_workers; ++i) {
+                ynet::actor::training_snapshot_data::worker_data wd;
+                wd.id = i;
+                wd.steps = steps_per_worker;
+                wd.avg_latency_ms = state.m.latency.avg();
+                wd.p99_latency_ms = state.m.latency.p99();
+                snap.workers.push_back(wd);
+            }
+
+            return ynet::actor::build_training_json(snap);
+        });
+
+        // Actors endpoint: basic actor list.
+        exporter->set_actors_provider([&]() -> std::string {
+            std::vector<ynet::actor::actor_status_data> actors;
+            ynet::actor::actor_status_data ps_actor;
+            ps_actor.name = "ps";
+            ps_actor.queue_size = 0;
+            ps_actor.total_messages = state.m.total_messages.load();
+            ps_actor.msg_rate_per_sec = 0;
+            actors.push_back(ps_actor);
+            for (int i = 0; i < expected_workers; ++i) {
+                ynet::actor::actor_status_data wa;
+                wa.name = "worker-" + std::to_string(i);
+                wa.queue_size = 0;
+                wa.total_messages = static_cast<uint64_t>(steps_per_worker);
+                wa.msg_rate_per_sec = 0;
+                actors.push_back(wa);
+            }
+            return ynet::actor::build_actors_json(actors);
+        });
+
+        // Network endpoint.
+        exporter->set_network_provider([&]() -> std::string {
+            std::vector<ynet::actor::network_stats_data> stats;
+            ynet::actor::network_stats_data ns;
+            ns.peer = "workers";
+            ns.bytes_recv = static_cast<int64_t>(state.m.total_bytes.load());
+            ns.bytes_sent = static_cast<int64_t>(state.m.total_bytes.load() * 0.01);
+            ns.recv_rate_mbps = 0;
+            ns.send_rate_mbps = 0;
+            ns.active_connections = connected_hint;
+            stats.push_back(ns);
+            return ynet::actor::build_network_json(stats);
+        });
+
+        // Launch metrics server on a dedicated thread (blocking I/O).
+        exporter->set_port(metrics_port);
+        exporter->start();
+
+        // Give the metrics server a moment to bind.
+        co_await sleep_for(std::chrono::milliseconds(50));
+    }
+
+    // ── Launch workers BEFORE the accept loop ─────────────────────
+    // Workers connect to PS, send gradients, and wait for acks.
+    // Using submit() with the tcp_worker_run coroutine directly (not a
+    // lambda) avoids the GCC 13.2 coroutine lambda capture corruption.
+    // Workers are paced apart to avoid overwhelming the WSL2 io_uring queue.
+    {
+        auto* worker_sched = ExecutionContext::current();
+        for (int i = 0; i < expected_workers; ++i) {
+            auto task = tcp_worker_run(i, port, num_params, steps_per_worker);
+            worker_sched->submit(task.release());
+            // Pace submissions to avoid io_uring ENOBUFS in WSL2.
+            co_await sleep_for(std::chrono::milliseconds(200));
+        }
+    }
+
     int connected = 0;
     while (connected < expected_workers) {
         Accept a(listen_fd);
@@ -292,10 +464,12 @@ Task<void> tcp_ps_main(uint16_t port, int expected_workers,
         auto* sched = ExecutionContext::current();
         if (sched) sched->submit(tcp_handle_client(*c, state).release());
         ++connected;
+        connected_hint = connected;
     }
 
     // Measure transfer time starting AFTER all workers connect.
     auto t_xfer_start = std::chrono::steady_clock::now();
+    t_xfer_start_hint = t_xfer_start;
     int expected = expected_workers * steps_per_worker;
     while ((int)state.m.total_steps.load() < expected)
         co_await sleep_for(std::chrono::milliseconds(10));
@@ -325,34 +499,101 @@ Task<void> tcp_ps_main(uint16_t port, int expected_workers,
     std::cout << "  latency P99:" << std::fixed << std::setprecision(3) << state.m.latency.p99() << " ms" << std::endl;
     std::cout << "  latency max:" << std::fixed << std::setprecision(3) << state.m.latency.max_latency() << " ms" << std::endl;
 
-    // Auto-launch workers in-process to avoid multi-process coordination issues.
-    auto* sched = ExecutionContext::current();
-    for (int i = 0; i < expected_workers; ++i) {
-        sched->submit([i, port, num_params, steps_per_worker]() -> Task<void> {
-            auto sock = co_await TcpSocket::connect("127.0.0.1", port,
-                                                     std::chrono::seconds(5));
-            if (!sock.is_valid()) co_return;
-            int fd = sock.fd();
-            tune_tcp(fd);
+    // ── Populate output result ────────────────────────────────────
+    if (result) {
+        result->total_steps    = static_cast<int>(state.m.total_steps.load());
+        result->total_bytes    = static_cast<int64_t>(state.m.total_bytes.load());
+        result->checksum       = state.m.checksum.load();
+        result->latency_p50_ms = state.m.latency.p50();
+        result->latency_p99_ms = state.m.latency.p99();
+        result->connected_workers = connected_hint;
 
-            auto grads = std::make_unique<float[]>(num_params);
-            for (size_t j = 0; j < num_params; ++j)
-                grads[j] = 0.1f + (static_cast<float>(i) * 0.01f);
-            size_t vec_bytes = num_params * sizeof(float);
-
-            for (int step = 0; step < steps_per_worker; ++step) {
-                co_await Write(fd, grads.get(), vec_bytes);
-                uint8_t ack = 0;
-                Read r(fd, &ack, 1);
-                r.with_timeout(std::chrono::seconds(5));
-                auto rr = co_await r;
-                if (!rr || *rr < 1) break;
-            }
-            co_await Close(fd);
-        }().release());
+        auto elapsed = std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - t_xfer_start_hint).count();
+        if (elapsed > 0.001) {
+            double data_mb = state.m.total_bytes.load() / 1048576.0;
+            result->throughput_mbps = data_mb / elapsed;
+        }
     }
 
     co_await Close(listen_fd);
+
+    // ── Metrics exporter shutdown or snapshot ──────────────────────
+    if (metrics_port > 0) {
+        if (keep_metrics_alive) {
+            // Store final benchmark state as snapshots.  The provider lambdas
+            // captured [&] references to locals that are about to be destroyed.
+            // Switching to cached snapshots lets the endpoints serve stable data.
+            exporter->store_nodes_snapshot(
+                ynet::actor::build_nodes_json("127.0.0.1", port,
+                    std::vector<std::pair<std::string, uint16_t>>(
+                        expected_workers, {"127.0.0.1", 0}),
+                    std::vector<bool>(expected_workers, true)));
+
+            ynet::actor::training_snapshot_data snap;
+            snap.timestamp_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count();
+            snap.total_steps   = static_cast<int>(state.m.total_steps.load());
+            snap.total_bytes   = static_cast<int64_t>(state.m.total_bytes.load());
+            snap.checksum      = state.m.checksum.load();
+            snap.latency_p50_ms = state.m.latency.p50();
+            snap.latency_p99_ms = state.m.latency.p99();
+
+            double elapsed_s = std::chrono::duration<double>(
+                std::chrono::steady_clock::now() - t_xfer_start_hint).count();
+            if (elapsed_s > 0.001) {
+                snap.throughput_mbps = (state.m.total_bytes.load() / 1048576.0) / elapsed_s;
+            }
+            for (int i = 0; i < expected_workers; ++i) {
+                ynet::actor::training_snapshot_data::worker_data wd;
+                wd.id = i;
+                wd.steps = steps_per_worker;
+                wd.avg_latency_ms = state.m.latency.avg();
+                wd.p99_latency_ms = state.m.latency.p99();
+                snap.workers.push_back(wd);
+            }
+            exporter->store_training_snapshot(
+                ynet::actor::build_training_json(snap));
+
+            std::vector<ynet::actor::actor_status_data> actors;
+            {
+                ynet::actor::actor_status_data a;
+                a.name = "ps";
+                a.total_messages = state.m.total_messages.load();
+                actors.push_back(a);
+            }
+            for (int i = 0; i < expected_workers; ++i) {
+                ynet::actor::actor_status_data a;
+                a.name = "worker-" + std::to_string(i);
+                a.total_messages = static_cast<uint64_t>(steps_per_worker);
+                actors.push_back(a);
+            }
+            exporter->store_actors_snapshot(
+                ynet::actor::build_actors_json(actors));
+
+            std::vector<ynet::actor::network_stats_data> net;
+            {
+                ynet::actor::network_stats_data ns;
+                ns.peer = "workers";
+                ns.bytes_recv = static_cast<int64_t>(state.m.total_bytes.load());
+                ns.bytes_sent = static_cast<int64_t>(state.m.total_bytes.load() * 0.01);
+                ns.active_connections = connected_hint;
+                if (elapsed_s > 0.001) {
+                    ns.recv_rate_mbps = (state.m.total_bytes.load() / 1048576.0) / elapsed_s;
+                }
+                net.push_back(ns);
+            }
+            exporter->store_network_snapshot(
+                ynet::actor::build_network_json(net));
+
+            // Switch to snapshot-based providers so the exporter no longer
+            // references our about-to-be-destroyed stack variables.
+            exporter->use_snapshots();
+        } else {
+            exporter->stop();
+            co_await sleep_for(std::chrono::milliseconds(300));
+        }
+    }
 }
 
 // ── Main ───────────────────────────────────────────────────────────────
@@ -362,7 +603,10 @@ int main(int argc, char* argv[]) {
 
     if (argc < 2) {
         std::cerr << "Usage: dist-bench local  <workers> <params> <steps>" << std::endl;
-        std::cerr << "       dist-bench tcp    <workers> <params> <steps>" << std::endl;
+        std::cerr << "       dist-bench tcp    <workers> <params> <steps> [ps_port] [metrics_port]" << std::endl;
+        std::cerr << "       dist-bench ps     <port> <workers> <params> <steps> [metrics_port]" << std::endl;
+        std::cerr << "       dist-bench worker <addr> <id> <steps> [batch] [params]" << std::endl;
+        std::cerr << "       dist-bench serve  <metrics_port> [workers] [params] [steps] [ps_port]" << std::endl;
         return 1;
     }
 
@@ -379,21 +623,27 @@ int main(int argc, char* argv[]) {
         int w = (argc > 2) ? std::atoi(argv[2]) : 4;
         size_t p = (argc > 3) ? (size_t)std::atoll(argv[3]) : 10000;
         int s = (argc > 4) ? std::atoi(argv[4]) : 100;
+        // Use int (not uint16_t) to avoid GCC 13.2 coroutine capture corruption.
+        int ps_port = (argc > 5) ? std::atoi(argv[5]) : 18001;
+        int mport   = (argc > 6) ? std::atoi(argv[6]) : 0;
 
         return Launcher().threads(w + 2).run(
             [=](ynet::async::lifecycle::ShutdownCoordinator&) -> ynet::async::Task<void> {
-                co_await tcp_ps_main(18001, w, p, s);
+                co_await tcp_ps_main(static_cast<uint16_t>(ps_port), w, p, s, mport);
             });
 
     } else if (mode == "ps") {
-        uint16_t port    = (argc > 2) ? (uint16_t)std::atoi(argv[2]) : 18001;
+        // Use int (not uint16_t) to avoid GCC 13.2 coroutine capture corruption.
+        int port        = (argc > 2) ? std::atoi(argv[2]) : 18001;
         int num_workers  = (argc > 3) ? std::atoi(argv[3]) : 4;
         size_t num_params = (argc > 4) ? (size_t)std::atoll(argv[4]) : 10000;
         int steps_per    = (argc > 5) ? std::atoi(argv[5]) : 100;
+        int mport        = (argc > 6) ? std::atoi(argv[6]) : 18080;
 
-        return Launcher().threads(num_workers + 1).run(
+        return Launcher().threads(num_workers + 2).run(
             [=](ynet::async::lifecycle::ShutdownCoordinator&) -> ynet::async::Task<void> {
-                co_await tcp_ps_main(port, num_workers, num_params, steps_per);
+                co_await tcp_ps_main(static_cast<uint16_t>(port), num_workers,
+                                     num_params, steps_per, mport);
             });
 
     } else if (mode == "worker") {
@@ -428,6 +678,117 @@ int main(int argc, char* argv[]) {
             }
             co_await Close(fd);
         });
+
+    } else if (mode == "serve") {
+        // Dashboard companion mode — runs a quick benchmark to populate
+        // metrics, then keeps the HTTP server alive for the Dashboard.
+        // Press Ctrl-C to stop.
+        int mport        = (argc > 2) ? std::atoi(argv[2]) : 18080;
+        int w            = (argc > 3) ? std::atoi(argv[3]) : 2;
+        size_t p         = (argc > 4) ? (size_t)std::atoll(argv[4]) : 500;
+        int s            = (argc > 5) ? std::atoi(argv[5]) : 20;
+        uint16_t ps_port = (argc > 6) ? (uint16_t)std::atoi(argv[6]) : 18001;
+
+        std::cout << "[serve] Starting benchmark + metrics on :" << mport << std::endl;
+        std::cout << "[serve] Dashboard URL: http://127.0.0.1:" << mport << std::endl;
+        std::cout << "[serve] Press Ctrl-C to stop" << std::endl;
+
+        // 1. Run benchmark first (no metrics interference).
+        // 2. Start metrics server on dedicated thread with real results.
+        // 3. Keep alive until Ctrl-C.
+        //
+        // Note: the benchmark completes in ~10ms with WSL2-safe params,
+        // so the Dashboard (1Hz poll) cannot capture in-progress data.
+        // The snapshot reflects the completed benchmark results.
+        return Launcher().threads(w + 2).run(
+            [=](ynet::async::lifecycle::ShutdownCoordinator&) -> ynet::async::Task<void> {
+                bench_result result;
+                co_await tcp_ps_main(ps_port, w, p, s, /*metrics_port=*/0,
+                                     /*keep_metrics_alive=*/false, &result);
+
+                auto exporter = std::make_shared<ynet::actor::metrics_exporter>();
+                exporter->set_port(mport);
+
+                // Nodes.
+                {
+                    std::vector<std::pair<std::string, uint16_t>> wrk;
+                    std::vector<bool> online_vec;
+                    for (int i = 0; i < w; ++i) {
+                        wrk.emplace_back("127.0.0.1", static_cast<uint16_t>(0));
+                        online_vec.push_back(true);
+                    }
+                    exporter->store_nodes_snapshot(
+                        ynet::actor::build_nodes_json("127.0.0.1", ps_port,
+                                                       wrk, online_vec));
+                }
+
+                // Training — real benchmark data.
+                {
+                    ynet::actor::training_snapshot_data snap;
+                    snap.timestamp_ms = std::chrono::duration_cast<
+                        std::chrono::milliseconds>(
+                        std::chrono::system_clock::now().time_since_epoch()).count();
+                    snap.total_steps    = result.total_steps;
+                    snap.total_bytes    = result.total_bytes;
+                    snap.throughput_mbps = result.throughput_mbps;
+                    snap.latency_p50_ms  = result.latency_p50_ms;
+                    snap.latency_p99_ms  = result.latency_p99_ms;
+                    snap.checksum        = result.checksum;
+                    for (int i = 0; i < w; ++i) {
+                        ynet::actor::training_snapshot_data::worker_data wd;
+                        wd.id = i;
+                        wd.steps = s;
+                        wd.avg_latency_ms = result.latency_p50_ms;
+                        wd.p99_latency_ms = result.latency_p99_ms;
+                        snap.workers.push_back(wd);
+                    }
+                    exporter->store_training_snapshot(
+                        ynet::actor::build_training_json(snap));
+                }
+
+                // Actors.
+                {
+                    std::vector<ynet::actor::actor_status_data> actors;
+                    ynet::actor::actor_status_data a;
+                    a.name = "ps";
+                    a.total_messages = static_cast<uint64_t>(result.total_steps);
+                    a.msg_rate_per_sec = result.throughput_mbps;
+                    actors.push_back(a);
+                    for (int i = 0; i < w; ++i) {
+                        ynet::actor::actor_status_data wa;
+                        wa.name = "worker-" + std::to_string(i);
+                        wa.total_messages = static_cast<uint64_t>(s);
+                        actors.push_back(wa);
+                    }
+                    exporter->store_actors_snapshot(
+                        ynet::actor::build_actors_json(actors));
+                }
+
+                // Network.
+                {
+                    std::vector<ynet::actor::network_stats_data> net;
+                    ynet::actor::network_stats_data ns;
+                    ns.peer = "workers";
+                    ns.bytes_recv = result.total_bytes;
+                    ns.bytes_sent = result.total_bytes / 100;
+                    ns.recv_rate_mbps = result.throughput_mbps;
+                    ns.active_connections = result.connected_workers;
+                    net.push_back(ns);
+                    exporter->store_network_snapshot(
+                        ynet::actor::build_network_json(net));
+                }
+
+                exporter->use_snapshots();
+                exporter->start();
+
+                std::cout << "[serve] Benchmark complete. Metrics available at "
+                          << "http://127.0.0.1:" << mport << std::endl;
+                std::cout << "[serve] Press Ctrl-C to stop" << std::endl;
+
+                while (true) {
+                    std::this_thread::sleep_for(std::chrono::seconds(1));
+                }
+            });
     }
 
     return 1;
