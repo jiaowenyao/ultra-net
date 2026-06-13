@@ -51,7 +51,7 @@ public:
     Task<void> send(const std::vector<uint8_t>& payload) {
         uint32_t length = static_cast<uint32_t>(payload.size());
         auto write_result = co_await m_sock.write(&length, sizeof(length));
-        if (!write_result) {
+        if (!write_result || *write_result != sizeof(length)) {
             m_valid = false;
             co_return;
         }
@@ -59,7 +59,7 @@ public:
         while (offset < payload.size()) {
             auto chunk_result = co_await m_sock.write(
                 payload.data() + offset, payload.size() - offset);
-            if (!chunk_result) {
+            if (!chunk_result || *chunk_result == 0) {
                 m_valid = false;
                 co_return;
             }
@@ -179,14 +179,21 @@ private:
         recv_buffer buf(recv_buffer::k_default_size);
 
         while (true) {
-            // Read 4-byte length prefix.
+            // Read 4-byte length prefix (handle short reads).
             uint32_t message_length = 0;
-            Read length_reader(client_fd, &message_length, sizeof(message_length));
-            length_reader.with_timeout(std::chrono::seconds(30));
+            size_t len_offset = 0;
+            uint8_t* len_ptr = reinterpret_cast<uint8_t*>(&message_length);
+            while (len_offset < sizeof(message_length)) {
+                Read length_reader(client_fd, len_ptr + len_offset,
+                                   sizeof(message_length) - len_offset);
+                length_reader.with_timeout(std::chrono::seconds(30));
 
-            auto read_result = co_await length_reader;
-            if (!read_result || *read_result < (ssize_t)sizeof(message_length)) {
-                break;
+                auto read_result = co_await length_reader;
+                if (!read_result || *read_result == 0) {
+                    co_await Close(client_fd);
+                    co_return;
+                }
+                len_offset += *read_result;
             }
 
             if (message_length == 0 || message_length > recv_buffer::k_default_size) {
