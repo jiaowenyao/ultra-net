@@ -1,9 +1,10 @@
-// MPSC Queue comprehensive tests.
-#include "ultranet/coroutine/mpsc_queue.hpp"
 #include <iostream>
 #include <thread>
 #include <vector>
 #include <atomic>
+#include "ultranet/coroutine/mpsc_queue.hpp"
+
+// MPSC Queue comprehensive tests.
 
 using namespace ynet::async::scheduling;
 
@@ -55,8 +56,12 @@ void test_wrap_around() {
     MpscQueue<int, N> q;
     // Fill, drain, fill again — tests sequence number wrap.
     for (int round = 0; round < 3; ++round) {
-        for (size_t i = 0; i < N; ++i) q.try_push(static_cast<int>(i + round * 100));
-        for (size_t i = 0; i < N; ++i) q.try_pop();
+        for (size_t i = 0; i < N; ++i) {
+            q.try_push(static_cast<int>(i + round * 100));
+        }
+        for (size_t i = 0; i < N; ++i) {
+            q.try_pop();
+        }
     }
     CHECK(q.try_push(999), "push after wrap works");
     auto v = q.try_pop();

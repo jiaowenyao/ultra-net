@@ -1,8 +1,9 @@
-// Actor message dispatch and handler tests.
-#include "ultranet/actor.hpp"
 #include <iostream>
 #include <string>
 #include <cassert>
+#include "ultranet/actor.hpp"
+
+// Actor message dispatch and handler tests.
 
 using namespace ynet::actor;
 

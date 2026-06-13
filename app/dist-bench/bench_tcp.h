@@ -151,7 +151,10 @@ inline Task<void> tcp_ps_main(const bench_config& cfg,
         pub->set_t_start(t_xfer_start);
     }
     int expected = connected * cfg.num_steps;
-    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(120);
+    // Use a generous timeout: WSL2 TCP loopback is ~0.7 MB/s.
+    // 4 workers × 50000 params × 200 steps × 4 bytes = 160 MB
+    // at 0.7 MB/s ≈ 229 seconds.  Use 600s for safety margin.
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(600);
 
     while (static_cast<int>(state.total_steps.load()) < expected) {
         if (std::chrono::steady_clock::now() > deadline) {

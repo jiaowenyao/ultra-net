@@ -1,8 +1,9 @@
-// Cluster gossip protocol tests.
-#include "ultranet/actor/net/cluster.h"
 #include <iostream>
 #include <cassert>
 #include <cstring>
+#include "ultranet/actor/net/cluster.h"
+
+// Cluster gossip protocol tests.
 
 using namespace ynet::actor::net;
 
@@ -35,7 +36,9 @@ void test_gossip_round_trip() {
     // c2 should now know about c1.
     bool found_c1 = false;
     for (auto& n : nodes) {
-        if (n.id == 1001) found_c1 = true;
+        if (n.id == 1001) {
+            found_c1 = true;
+        }
     }
     CHECK(found_c1, "c2 discovered c1 via gossip");
     PASS();
@@ -75,7 +78,9 @@ void test_self_filtering() {
     // Verify no duplicate self.
     int self_count = 0;
     for (auto& n : nodes) {
-        if (n.id == 1001) ++self_count;
+        if (n.id == 1001) {
+            ++self_count;
+        }
     }
     CHECK(self_count == 1, "self appears exactly once");
     PASS();
@@ -94,7 +99,9 @@ void test_liveness_timeout() {
     auto nodes = c1.live_nodes(0);
     bool found_c2 = false;
     for (auto& n : nodes) {
-        if (n.id == 1002) found_c2 = true;
+        if (n.id == 1002) {
+            found_c2 = true;
+        }
     }
     CHECK(!found_c2 || nodes.size() == 1, "c2 dead with 0ms timeout");
     PASS();

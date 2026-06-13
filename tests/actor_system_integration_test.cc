@@ -1,11 +1,12 @@
-// Actor system integration tests.
-// Verifies: transport auto-start, gossip loop, inbound routing, remote find.
-#include "ultranet/actor.hpp"
 #include <iostream>
 #include <string>
 #include <thread>
 #include <chrono>
 #include <cassert>
+#include "ultranet/actor.hpp"
+
+// Actor system integration tests.
+// Verifies: transport auto-start, gossip loop, inbound routing, remote find.
 
 using namespace ynet::actor;
 

@@ -1,10 +1,11 @@
-// Phase 1 tests: actor v2 core (spawn, find, send, ref, uri, registry).
-#include "ultranet/actor.hpp"
 #include <iostream>
 #include <string>
 #include <cassert>
 #include <thread>
 #include <chrono>
+#include "ultranet/actor.hpp"
+
+// Phase 1 tests: actor v2 core (spawn, find, send, ref, uri, registry).
 
 using namespace ynet::actor;
 
@@ -23,7 +24,10 @@ class echo_actor : public actor<echo_actor> {
 public:
     int m_count = 0;
     std::string m_last;
-    void on_ping(ping_msg& m) { m_count++; m_last = m.text; }
+    void on_ping(ping_msg& m) {
+        m_count++;
+        m_last = m.text;
+    }
     int get_count() const { return m_count; }
 };
 

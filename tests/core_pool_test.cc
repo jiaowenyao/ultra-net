@@ -1,11 +1,13 @@
-// Thread pool and unified_task comprehensive tests.
-#include "ultranet/buffer/buffer.h"
-#include "ultranet/coroutine/thread_pool.hpp"
-#include "ultranet/coroutine/unified_task.hpp"
 #include <iostream>
 #include <thread>
 #include <atomic>
 #include <chrono>
+#include "ultranet/buffer/buffer.h"
+#include "ultranet/coroutine/thread_pool.hpp"
+#include "ultranet/coroutine/unified_task.hpp"
+#include "ultranet/coroutine/task.hpp"
+
+// Thread pool and unified_task comprehensive tests.
 
 using namespace ynet::async::scheduling;
 
@@ -17,13 +19,15 @@ static int g_passed = 0, g_failed = 0;
 
 // ── UnifiedTask tests ──────────────────────────────────────────────────
 
-#include "ultranet/coroutine/task.hpp"
 using ynet::async::Task;
 
 void test_unified_task_coroutine() {
     T("unified_task coroutine handle");
     bool called = false;
-    auto make_task = [](bool* c) -> Task<void> { *c = true; co_return; };
+    auto make_task = [](bool* c) -> Task<void> {
+        *c = true;
+        co_return;
+    };
     auto t = make_task(&called);
     auto h = t.release();
     UnifiedTask ut(h);
@@ -89,7 +93,11 @@ void test_pool_active_tasks() {
     WorkStealingThreadPool pool(2);
     CHECK(pool.active_tasks() == 0, "zero initially");
     std::atomic<int> c{0};
-    for (int i = 0; i < 10; ++i) pool.submit_function([&]{ c++; });
+    for (int i = 0; i < 10; ++i) {
+        pool.submit_function([&]() {
+            c++;
+        });
+    }
     pool.wait_all();
     CHECK(pool.active_tasks() == 0, "zero after wait");
     CHECK(c.load() == 10, "all done");

@@ -60,8 +60,15 @@ struct cpu_snapshot {
     }
 
     double elapsed_ms(const cpu_snapshot& other) const {
-        return (utime - other.utime + stime - other.stime)
-             * 1000.0 / sysconf(_SC_CLK_TCK);
+        // Use signed arithmetic to avoid unsigned wrap-around when
+        // CPU time is very small (common for IO-bound workloads).
+        long long du = static_cast<long long>(utime)
+                     - static_cast<long long>(other.utime);
+        long long ds = static_cast<long long>(stime)
+                     - static_cast<long long>(other.stime);
+        if (du < 0) { du = 0; }
+        if (ds < 0) { ds = 0; }
+        return (du + ds) * 1000.0 / sysconf(_SC_CLK_TCK);
     }
 };
 

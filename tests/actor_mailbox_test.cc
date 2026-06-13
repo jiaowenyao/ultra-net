@@ -1,12 +1,13 @@
-// Mailbox + async scheduling tests.
-// Verifies: push/pop, overflow, drain, async delivery, self-reactivation, backpressure.
-#include "ultranet/actor.hpp"
 #include <iostream>
 #include <string>
 #include <cassert>
 #include <thread>
 #include <chrono>
 #include <atomic>
+#include "ultranet/actor.hpp"
+
+// Mailbox + async scheduling tests.
+// Verifies: push/pop, overflow, drain, async delivery, self-reactivation, backpressure.
 
 using namespace ynet::actor;
 
