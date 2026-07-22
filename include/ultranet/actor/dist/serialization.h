@@ -59,18 +59,6 @@ public:
         m_data.push_back(static_cast<uint8_t>( v        & 0xFF));
     }
 
-    void write_float(float v) {
-        uint32_t raw;
-        std::memcpy(&raw, &v, sizeof(raw));
-        write_u32(raw);
-    }
-
-    void write_double(double v) {
-        uint64_t raw;
-        std::memcpy(&raw, &v, sizeof(raw));
-        write_u64(raw);
-    }
-
     void write_string(const std::string& s) {
         write_u32(static_cast<uint32_t>(s.size()));
         m_data.insert(m_data.end(), s.begin(), s.end());
@@ -130,20 +118,6 @@ public:
                    | (static_cast<uint64_t>(p[6]) <<  8)
                    | (static_cast<uint64_t>(p[7])      );
         m_offset += sizeof(v);
-        return v;
-    }
-
-    float read_float() {
-        uint32_t raw = read_u32();
-        float v;
-        std::memcpy(&v, &raw, sizeof(v));
-        return v;
-    }
-
-    double read_double() {
-        uint64_t raw = read_u64();
-        double v;
-        std::memcpy(&v, &raw, sizeof(v));
         return v;
     }
 

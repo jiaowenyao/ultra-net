@@ -53,17 +53,6 @@ public:
         t_current_context = nullptr;
     }
 
-    // 作用域守卫
-    class Scope {
-    public:
-        explicit Scope(const Config& config = Config{});
-        ~Scope();  // defined in src/io_engine.cc (needs full IoUringEngine)
-        Scope(const Scope&) = delete;
-        Scope& operator=(const Scope&) = delete;
-        Scope(Scope&&) = delete;
-        Scope& operator=(Scope&&) = delete;
-    };
-
     io_uring_sqe* get_sqe() noexcept {
         return io_uring_get_sqe(&m_ring);
     }

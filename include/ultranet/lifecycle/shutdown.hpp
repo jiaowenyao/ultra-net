@@ -1,26 +1,20 @@
+// ShutdownCoordinator — 轻量级关闭协调器。
+//
+// 核心只有一个 atomic<bool> 标志位。install_signal_handlers() 可选地
+// 安装 SIGINT/SIGTERM 处理器来自动触发关闭。调用方通过 is_shutdown()
+// 轮询检查关闭状态。
+//
+// 用法：
+//   ShutdownCoordinator sd;
+//   sd.install_signal_handlers();
+//   while (!sd.is_shutdown()) { ... }
 #pragma once
 
-#include "ultranet/coroutine/channel.hpp"
 #include "ultranet/utils/noncopyable.h"
 #include <atomic>
 #include <csignal>
 
 namespace ynet::async::lifecycle {
-
-// Lightweight shutdown coordinator.
-//
-// Usage:
-//   ShutdownCoordinator sd;
-//   sd.install_signal_handlers();  // optional: Ctrl-C → shutdown
-//
-//   // In accept / processing loops:
-//   while (!sd.is_shutdown()) { ... }
-//
-//   // To wait for shutdown asynchronously:
-//   co_await sd.wait();
-//
-//   // To trigger shutdown:
-//   sd.shutdown();
 
 class ShutdownCoordinator : ynet::utils::Noncopyable {
 public:
@@ -35,6 +29,7 @@ public:
         }
     }
 
+    // 安装信号处理器：Ctrl+C 自动触发 shutdown()
     void install_signal_handlers() {
         register_instance();
         std::signal(SIGINT, signal_handler);
@@ -42,27 +37,22 @@ public:
         m_signals_installed = true;
     }
 
+    // 触发关闭（CAS 保证幂等）
     void shutdown() noexcept {
         bool expected = false;
-        if (m_shutdown.compare_exchange_strong(expected, true,
-                std::memory_order_acq_rel)) {
-            m_signal.close();
-        }
+        m_shutdown.compare_exchange_strong(expected, true,
+                std::memory_order_acq_rel);
     }
 
     bool is_shutdown() const noexcept {
         return m_shutdown.load(std::memory_order_acquire);
     }
 
-    // Coroutine-compatible: suspends until shutdown is triggered.
-    auto wait() noexcept { return m_signal.read(); }
-
 private:
-    Channel<bool, 1> m_signal;
     std::atomic<bool> m_shutdown{false};
     bool m_signals_installed{false};
 
-    // Intrusive linked list for safe multi-instance signal handling.
+    // 侵入式链表：支持多个 ShutdownCoordinator 实例同时响应信号
     ShutdownCoordinator* m_next{nullptr};
     static inline std::atomic<ShutdownCoordinator*> s_head{nullptr};
 

@@ -554,21 +554,6 @@ TEST(SerializationTest, U64RoundTrip) {
     EXPECT_EQ(r.read_u64(), 0ULL);
 }
 
-TEST(SerializationTest, FloatRoundTrip) {
-    serializer s;
-    s.write_float(3.14159f); s.write_float(-1.0f);
-    serializer r(s.consume());
-    EXPECT_NEAR(r.read_float(), 3.14159f, 0.0001f);
-    EXPECT_NEAR(r.read_float(), -1.0f, 0.0001f);
-}
-
-TEST(SerializationTest, DoubleRoundTrip) {
-    serializer s;
-    s.write_double(3.141592653589793);
-    serializer r(s.consume());
-    EXPECT_NEAR(r.read_double(), 3.141592653589793, 0.0000001);
-}
-
 TEST(SerializationTest, StringRoundTrip) {
     serializer s;
     s.write_string("hello world"); s.write_string("");

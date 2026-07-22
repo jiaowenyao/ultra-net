@@ -85,7 +85,7 @@ void test_socketpair() {
 void test_buffer_group() {
     std::cout << "Test: Buffer group creation... " << std::flush;
 
-    io::IoUringEngine::Scope ctx_scope{};
+    io::IoUringEngine::init_thread_local();
     auto ctx = io::IoUringEngine::current();
     if (!ctx) {
         std::cout << "SKIP (no ctx)" << std::endl;

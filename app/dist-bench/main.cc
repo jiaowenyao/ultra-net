@@ -164,7 +164,7 @@ int main(int argc, char* argv[]) {
 
     if (cfg.mode == "worker") {
         return Launcher().threads(2).run(
-            [cfg]() -> Task<void> {
+            [cfg](lifecycle::ShutdownCoordinator&) -> Task<void> {
                 co_await worker_mode_run(cfg);
             });
     }

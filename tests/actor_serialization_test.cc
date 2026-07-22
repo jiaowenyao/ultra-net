@@ -74,35 +74,7 @@ void test_serializer_u64() {
     PASS();
 }
 
-void test_serializer_float() {
-    T("serializer float round-trip");
-    serializer s;
-    s.write_float(3.14159f);
-    s.write_float(-1.0f);
-    s.write_float(0.0f);
 
-    auto raw = s.consume();
-    serializer r(std::move(raw));
-    float v1 = r.read_float();
-    float v2 = r.read_float();
-    float v3 = r.read_float();
-    CHECK(v1 > 3.14158f && v1 < 3.14160f, "float value 1");
-    CHECK(v2 < -0.95f && v2 > -1.05f, "float value 2");
-    CHECK(v3 > -0.001f && v3 < 0.001f, "float value 3");
-    PASS();
-}
-
-void test_serializer_double() {
-    T("serializer double round-trip");
-    serializer s;
-    s.write_double(3.141592653589793);
-    s.write_double(0.0);
-
-    serializer r(s.consume());
-    CHECK(r.read_double() > 3.141592653 && r.read_double() < 3.141592654, "double value 1");
-    CHECK(r.read_double() == 0.0, "double value 2");
-    PASS();
-}
 
 void test_serializer_string() {
     T("serializer string round-trip");
@@ -264,15 +236,14 @@ void test_serializer_combined() {
     s.write_u32(0xDEADBEEF);
     s.write_string("test");
     s.write_u16(0xBEEF);
-    s.write_double(1.5);
+    s.write_u64(0x12345678ABCDULL);
 
     serializer r(s.consume());
     CHECK(r.read_u8() == 0xAA, "u8");
     CHECK(r.read_u32() == 0xDEADBEEF, "u32");
     CHECK(r.read_string() == "test", "string");
     CHECK(r.read_u16() == 0xBEEF, "u16");
-    double d = r.read_double();
-    CHECK(d > 1.49 && d < 1.51, "double");
+    CHECK(r.read_u64() == 0x12345678ABCDULL, "u64");
     CHECK(r.eof(), "consumed all data");
     PASS();
 }
@@ -285,8 +256,6 @@ int main() {
     test_serializer_u16();
     test_serializer_u32();
     test_serializer_u64();
-    test_serializer_float();
-    test_serializer_double();
     test_serializer_string();
     test_serializer_bytes();
     test_serializer_empty_buffer();
