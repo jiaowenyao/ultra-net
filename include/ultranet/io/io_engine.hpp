@@ -40,6 +40,8 @@ public:
         return t_current_context != nullptr;
     }
 
+    // 线程局部的引擎实例。由 Scope RAII 管理生命周期，
+    // init_thread_local 分配，destroy_thread_local 释放。
     static void init_thread_local(const Config& config = Config{}) {
         if (!t_current_context) {
             t_current_context = new IoUringEngine(config);
@@ -47,10 +49,8 @@ public:
     }
 
     static void destroy_thread_local() {
-        if (t_current_context) {
-            delete t_current_context;
-            t_current_context = nullptr;
-        }
+        delete t_current_context;
+        t_current_context = nullptr;
     }
 
     // 作用域守卫
@@ -224,6 +224,7 @@ private:
     std::unordered_map<unsigned, std::unique_ptr<BufferGroup>> m_buffer_groups;
     std::atomic<size_t> m_pending_sqes{0};
     std::atomic<size_t> m_pending_ops{0};
+    // 裸指针，生命周期由 init/destroy_thread_local 静态方法管理
     static thread_local IoUringEngine* t_current_context;
 };
 

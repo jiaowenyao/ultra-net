@@ -12,12 +12,12 @@
 #include <atomic>
 #include <coroutine>
 #include <exception>
-#include <iostream>
 #include <optional>
 #include <assert.h>
 #include <format>
 #include "ultranet/utils/noncopyable.h"
 #include "ultranet/coroutine/execution_context.hpp"
+#include "ultranet/log/logger.hpp"
 
 
 namespace ynet::async {
@@ -77,16 +77,16 @@ struct TaskPromiseBase {
                 return parent;
             }
 
-            // 4. 无父协程（顶层任务）：处理未捕获异常后返回 noop
+            // 4. 无父协程（顶层任务）：记录未捕获异常后返回 noop
             if (promise.m_ex != nullptr) [[unlikely]] {
                 try {
                     std::rethrow_exception(promise.m_ex);
                 }
                 catch (const std::exception& e) {
-                    std::cerr << std::format("coroutine exception: {}\n", e.what());
+                    ULTRA_LOG_ERROR("coroutine exception: {}", e.what());
                 }
                 catch (...) {
-                    std::cerr << "coroutine exception: unknown\n";
+                    ULTRA_LOG_ERROR("coroutine exception: unknown");
                 }
             }
             return std::noop_coroutine();

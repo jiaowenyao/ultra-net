@@ -47,12 +47,11 @@ public:
      * 2. 将旧缓冲区中 [top, bottom) 范围的任务复制到新缓冲区
      * 3. 返回新缓冲区
      */
-    CircularBuffer* resize(int64_t bottom, int64_t top) {
+    std::unique_ptr<CircularBuffer> resize(int64_t bottom, int64_t top) {
         // 创建新的缓冲区，容量翻倍
-        CircularBuffer* new_buffer = new CircularBuffer(m_capacity * 2);
+        auto new_buffer = std::make_unique<CircularBuffer>(m_capacity * 2);
 
-        // 复制现有任务到新缓冲区
-        // 注意：这里从 top 到 bottom，包含所有有效任务
+        // 复制现有任务到新缓冲区 [top, bottom)
         for (int64_t i = top; i < bottom; ++i) {
             new_buffer->put(i, get(i));
         }
@@ -103,13 +102,9 @@ public:
      * 释放所有分配的环形缓冲区内存
      */
     ~WorkStealingQueue() {
-        // 删除当前缓冲区
+        // 销毁当前缓冲区
         delete m_buffer.load(std::memory_order_relaxed);
-
-        // 删除所有垃圾缓冲区（扩容时产生的旧缓冲区）
-        for (auto* buf : m_garbage) {
-            delete buf;
-        }
+        // m_garbage（unique_ptr 向量）自动清理旧缓冲区
     }
 
     // 禁用拷贝（工作窃取队列不应该被拷贝）
@@ -141,18 +136,16 @@ public:
         // 获取当前缓冲区
         CircularBuffer<T>* buf = m_buffer.load(std::memory_order_relaxed);
 
-        // 检查是否需要扩容
-        // 当前元素数量 = bottom - top
-        // 如果元素数量 >= 容量 - 1，则需要扩容（留一个空位避免满和空的混淆）
+        // 检查是否需要扩容 (留一个空位避免满和空的混淆)
         if (static_cast<size_t>(b - t) >= buf->capacity() - 1) {
-            // 扩容
-            buf = buf->resize(b, t);
+            // 扩容：创建新缓冲区，旧缓冲区移交 unique_ptr 管理
+            auto new_buf = buf->resize(b, t);
 
-            // 保存旧缓冲区到垃圾列表（稍后释放）
-            // 不能立即释放，因为可能有窃取者正在读取
-            m_garbage.push_back(m_buffer.load(std::memory_order_relaxed));
+            // 旧缓冲区移交 m_garbage（延迟释放，可能有窃取者正在读取）
+            m_garbage.emplace_back(m_buffer.load(std::memory_order_relaxed));
 
-            // 更新缓冲区指针
+            // 取原始指针存入 atomic（atomic 不支持 unique_ptr）
+            buf = new_buf.release();
             m_buffer.store(buf, std::memory_order_relaxed);
         }
 
@@ -297,7 +290,8 @@ private:
     alignas(64) std::atomic<int64_t> m_top;
     alignas(64) std::atomic<int64_t> m_bottom;
     std::atomic<CircularBuffer<T>*> m_buffer;
-    std::vector<CircularBuffer<T>*> m_garbage;
+    // 扩容产生的旧缓冲区（延迟释放，可能有窃取者正在读取）
+    std::vector<std::unique_ptr<CircularBuffer<T>>> m_garbage;
 };
 
 

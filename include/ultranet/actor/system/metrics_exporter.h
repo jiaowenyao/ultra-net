@@ -33,6 +33,7 @@
 #include <unistd.h>
 
 #include "ultranet/net/http.hpp"
+#include "ultranet/log/logger.hpp"
 
 namespace ynet::actor {
 
@@ -133,7 +134,7 @@ public:
 
         int listen_fd = ::socket(AF_INET, SOCK_STREAM, 0);
         if (listen_fd < 0) {
-            std::cerr << "[metrics] socket() failed: " << strerror(errno) << std::endl;
+            ULTRA_LOG_ERROR("[metrics] socket() failed: {}", strerror(errno));
             return;
         }
 
@@ -147,12 +148,12 @@ public:
 
         if (::bind(listen_fd, reinterpret_cast<sockaddr*>(&server_addr),
                    sizeof(server_addr)) < 0) {
-            std::cerr << "[metrics] bind failed: " << strerror(errno) << std::endl;
+            ULTRA_LOG_ERROR("[metrics] bind failed: {}", strerror(errno));
             ::close(listen_fd);
             return;
         }
         if (::listen(listen_fd, 16) < 0) {
-            std::cerr << "[metrics] listen failed: " << strerror(errno) << std::endl;
+            ULTRA_LOG_ERROR("[metrics] listen failed: {}", strerror(errno));
             ::close(listen_fd);
             return;
         }
@@ -165,7 +166,7 @@ public:
         } else {
             m_port = port;
         }
-        std::cout << "[metrics] exporter listening on :" << m_port << std::endl;
+        ULTRA_LOG_INFO("[metrics] exporter listening on :{}", m_port);
 
         m_listen_fd.store(listen_fd, std::memory_order_release);
 
@@ -197,7 +198,7 @@ public:
             self->m_listen_fd.store(-1, std::memory_order_release);
         });
 
-        std::cout << "[metrics] exporter started" << std::endl;
+        ULTRA_LOG_INFO("[metrics] exporter started");
     }
 
     // ── Synchronous HTTP request handler (runs on metrics thread) ────

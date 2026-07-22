@@ -25,8 +25,8 @@
 #include "ultranet/coroutine/thread_pool.hpp"
 #include "ultranet/lifecycle/shutdown.hpp"
 #include "ultranet/coroutine/execution_context.hpp"
+#include "ultranet/log/logger.hpp"
 #include <concepts>
-#include <iostream>
 
 namespace ynet::async {
 
@@ -59,7 +59,7 @@ public:
             // 阻塞直到所有任务完成或收到关闭信号
             pool.wait_all();
         } catch (const std::exception& e) {
-            std::cerr << "Fatal: " << e.what() << std::endl;
+            ULTRA_LOG_CRITICAL("Fatal: {}", e.what());
             return 1;
         }
         return 0;
@@ -83,7 +83,7 @@ public:
             }
             pool.wait_all();
         } catch (const std::exception& e) {
-            std::cerr << "Fatal: " << e.what() << std::endl;
+            ULTRA_LOG_CRITICAL("Fatal: {}", e.what());
             return 1;
         }
         return 0;

@@ -10,6 +10,7 @@
 
 #include "ultranet/ultranet.h"
 #include "ultranet/lifecycle/shutdown.hpp"
+#include "ultranet/log/logger.hpp"
 
 namespace ynet::actor::net {
 
@@ -139,10 +140,10 @@ public:
                 m_port = ntohs(bound.sin_port);
             }
 
-            std::cout << "[transport] listening on :" << m_port << std::endl;
+            ULTRA_LOG_INFO("[transport] listening on :{}", m_port);
         } else {
-            std::cout << "[transport] serving on pre-bound fd:" << listen_fd
-                      << " port:" << m_port << std::endl;
+            ULTRA_LOG_INFO("[transport] serving on pre-bound fd:{} port:{}",
+                          listen_fd, m_port);
         }
 
         // 主循环：accept → 调优 → 提交连接处理协程
