@@ -90,36 +90,23 @@ public:
         return 0;
     }
 
-    // Run a function that does not need graceful shutdown (clients, one-shot
-    // operations). Signal handlers are still installed so the process can be
-    // terminated with Ctrl+C.
-    template <typename F>
-        requires std::is_invocable_r_v<Task<void>, F>
-              && (!std::is_invocable_r_v<Task<void>, F, lifecycle::ShutdownCoordinator&>)
-    int run(F&& fn) {
-        lifecycle::ShutdownCoordinator shutdown;
-        shutdown.install_signal_handlers();
-        try {
-            scheduling::WorkStealingThreadPool pool(m_threads, m_io_config);
-            ExecutionContext::Scope scope(&pool);
-            pool.submit(fn().release());
-            pool.wait_all();
-        } catch (const std::exception& e) {
-            std::cerr << "Fatal: " << e.what() << std::endl;
-            return 1;
-        }
-        return 0;
-    }
-
 private:
     size_t m_threads = std::thread::hardware_concurrency();
     io::IoUringEngineConfig m_io_config{};
 };
 
 // Zero-configuration entry point.  Equivalent to Launcher().run(fn).
+// Automatically detects whether fn accepts a ShutdownCoordinator&.
 template <typename F>
 inline int launch(F&& fn) {
-    return Launcher().run(std::forward<F>(fn));
+    return Launcher().run(
+        [fn = std::forward<F>(fn)](lifecycle::ShutdownCoordinator& sd) mutable -> Task<void> {
+            if constexpr (std::is_invocable_r_v<Task<void>, F, lifecycle::ShutdownCoordinator&>) {
+                co_await fn(sd);
+            } else {
+                co_await fn();
+            }
+        });
 }
 
 } // namespace ynet::async

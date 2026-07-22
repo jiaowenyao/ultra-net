@@ -202,6 +202,23 @@ private:
 //   uri:var     — UTF-8 actor URI
 //   ttl:4       — remaining hop count (net order)
 
+// Shared URI parser: "ultra://node/type/name" → actor_uri.
+inline actor_uri parse_uri_from_wire(const std::string& uri_str) {
+    actor_uri out;
+    auto first_slash = uri_str.find('/', 8);  // skip "ultra://"
+    auto second_slash = uri_str.find('/', first_slash + 1);
+    if (first_slash != std::string::npos && second_slash != std::string::npos) {
+        out.node = uri_str.substr(8, first_slash - 8);
+        out.type = uri_str.substr(first_slash + 1, second_slash - first_slash - 1);
+        out.name = uri_str.substr(second_slash + 1);
+    } else {
+        out.type = uri_str;
+        out.node = "*";
+        out.name = "";
+    }
+    return out;
+}
+
 inline std::vector<uint8_t> pack_actor_message(const actor_uri& target_uri,
                                                 uint64_t msg_type_hash,
                                                 const void* payload,
@@ -226,21 +243,7 @@ inline bool unpack_actor_message(const uint8_t* data, size_t len,
         return false;
     }
 
-    std::string uri_str = s.read_string();
-    // Simple parse: "ultra://node/type/name"
-    // For full parsing we rely on actor_uri::parse() — for now,
-    // store as a local URI.
-    auto first_slash = uri_str.find('/', 8);  // skip "ultra://"
-    auto second_slash = uri_str.find('/', first_slash + 1);
-    if (first_slash != std::string::npos && second_slash != std::string::npos) {
-        out_uri.node = uri_str.substr(8, first_slash - 8);
-        out_uri.type = uri_str.substr(first_slash + 1, second_slash - first_slash - 1);
-        out_uri.name = uri_str.substr(second_slash + 1);
-    } else {
-        out_uri.type = uri_str;
-        out_uri.node = "*";
-        out_uri.name = "";
-    }
+    out_uri = parse_uri_from_wire(s.read_string());
 
     out_msg_type = s.read_u64();
     uint32_t payload_len = s.read_u32();
@@ -276,18 +279,7 @@ inline bool unpack_actor_location(const uint8_t* data, size_t len,
         return false;
     }
 
-    std::string uri_str = s.read_string();
-    auto first_slash = uri_str.find('/', 8);
-    auto second_slash = uri_str.find('/', first_slash + 1);
-    if (first_slash != std::string::npos && second_slash != std::string::npos) {
-        out_uri.node = uri_str.substr(8, first_slash - 8);
-        out_uri.type = uri_str.substr(first_slash + 1, second_slash - first_slash - 1);
-        out_uri.name = uri_str.substr(second_slash + 1);
-    } else {
-        out_uri.type = uri_str;
-        out_uri.node = "*";
-        out_uri.name = "";
-    }
+    out_uri = parse_uri_from_wire(s.read_string());
     out_ttl = s.read_u32();
     return true;
 }

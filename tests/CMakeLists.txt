@@ -98,3 +98,14 @@ target_link_libraries(core_mpsc_test PRIVATE ultranet pthread)
 
 add_executable(core_pool_test core_pool_test.cc)
 target_link_libraries(core_pool_test PRIVATE ultranet pthread)
+
+add_executable(actor_robustness_test actor_robustness_test.cc)
+target_link_libraries(actor_robustness_test PRIVATE ultranet pthread)
+
+add_executable(actor_bench_test actor_bench_test.cc)
+target_link_libraries(actor_bench_test PRIVATE ultranet pthread)
+
+# GTest-based actor tests
+add_executable(actor_gtest actor_gtest.cc)
+target_include_directories(actor_gtest PRIVATE ${GTest_INCLUDE_DIR})
+target_link_libraries(actor_gtest PRIVATE ultranet pthread gtest gtest_main)

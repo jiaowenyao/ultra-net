@@ -111,7 +111,7 @@ int main(int argc, char* argv[]) {
 
     return Launcher()
         .threads(4)
-        .run([=]() -> Task<void> {
+        .run([=](lifecycle::ShutdownCoordinator&) -> Task<void> {
             co_await video_sender(host, port, fps, duration);
         });
 }

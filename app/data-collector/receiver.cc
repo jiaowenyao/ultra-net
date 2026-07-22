@@ -55,7 +55,7 @@ int main(int argc, char* argv[]) {
     uint16_t port = (argc > 1) ? static_cast<uint16_t>(std::atoi(argv[1])) : 9000;
     int duration = (argc > 2) ? std::atoi(argv[2]) : 10;
     std::cout << "Video Receiver: :" << port << " for " << duration << "s" << std::endl;
-    return Launcher().threads(2).run([=]() -> Task<void> {
+    return Launcher().threads(2).run([=](lifecycle::ShutdownCoordinator&) -> Task<void> {
         co_await video_receiver(port, duration);
     });
 }

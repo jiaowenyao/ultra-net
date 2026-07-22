@@ -5,8 +5,8 @@
 #include <unordered_map>
 #include <memory>
 #include <atomic>
-// BufferGroup forward-declared; full definition needed only by methods
-// defined out-of-line in src/io_engine.cc (breaks circular dependency).
+
+#include "ultranet/buffer/buffer.h"
 
 namespace ynet::async::io {
 
@@ -15,7 +15,6 @@ inline constexpr size_t BATCH_SUBMIT_THRESHOLD = 64;
 
 
 class IoUringEngine;
-class BufferGroup;
 
 struct IoUringEngineConfig {
     size_t entries = IOURING_DEFAULT_ENTRIES;

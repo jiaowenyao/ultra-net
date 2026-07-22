@@ -74,6 +74,8 @@ public:
 
     // Fire-and-forget: push a message into the actor's mailbox.
     // The message is delivered asynchronously via the thread pool.
+    // If the mailbox is under backpressure, this call may block briefly
+    // (bounded spin + yield); for a non-blocking variant, use try_send().
     template <typename Msg>
     void send(const Msg& msg) {
         if (m_proxy) {
@@ -82,10 +84,25 @@ public:
         }
     }
 
-    // Send a message to a specific mailbox slot (for priority routing).
+    // Non-blocking send: returns false if the mailbox is full (backpressure).
+    // Only meaningful for local actors; remote proxies always buffer.
     template <typename Msg>
-    void send_to(int /*slot*/, const Msg& msg) {
-        send(msg);
+    bool try_send(const Msg& msg) {
+        if (!m_proxy) return false;
+        auto* local = m_proxy->local_actor();
+        if (!local) {
+            // Remote proxy: fall back to fire-and-forget (always buffered).
+            uint64_t hash = actor_type_hash<Msg>();
+            m_proxy->deliver(hash, &msg, sizeof(msg));
+            return true;
+        }
+        // Local actor: try non-blocking push.
+        auto envelope = message_envelope::make(msg);
+        if (local->get_mailbox().try_push(std::move(envelope))) {
+            local->try_activate();
+            return true;
+        }
+        return false;
     }
 
     // Internal accessors.

@@ -44,7 +44,14 @@ public:
         std::visit([](auto& task) {
             using T = std::decay_t<decltype(task)>;
             if constexpr (std::is_same_v<T, std::coroutine_handle<>>) {
-                if (task && !task.done()) task.resume();
+                if (task && !task.done()) {
+                    task.resume();
+                    // If the coroutine reached its final suspend point,
+                    // destroy the frame now to prevent memory leaks.
+                    if (task.done()) {
+                        task.destroy();
+                    }
+                }
             } else {
                 if (task) task();
             }

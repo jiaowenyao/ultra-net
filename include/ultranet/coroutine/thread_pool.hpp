@@ -344,6 +344,8 @@ private:
             reactor.wait_for_events();
         }
 
+        // Drain remaining coroutine tasks — any that are done() after
+        // resume must be explicitly destroyed to prevent memory leaks.
         while (auto t = m_local_queues[worker_id]->pop()) { (*t)(); }
         while (auto t = m_mpsc_queues[worker_id]->try_pop()) { (*t)(); }
 

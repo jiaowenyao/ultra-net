@@ -14,6 +14,7 @@
 #include "ultranet/actor/core/actor_uri.h"
 #include "ultranet/actor/core/type_hash.h"
 #include "ultranet/actor/core/mailbox.h"
+#include "ultranet/log/logger.hpp"
 
 namespace ynet::actor {
 
@@ -61,10 +62,25 @@ public:
 
     // Deliver a message to this actor by type hash.
     // Called from pull_and_run() on the thread pool.
+    // Wrapped in an error boundary: if a handler throws, the exception is
+    // caught and logged, and the actor continues processing.
     virtual void deliver(uint64_t msg_type, const void* data, size_t len) {
         auto it = m_handlers.find(msg_type);
         if (it != m_handlers.end()) {
-            it->second(data, len);
+            try {
+                it->second(data, len);
+            } catch (const std::exception& e) {
+                // Log and continue — one bad handler shouldn't kill the actor.
+                ULTRA_LOG_ERROR("[actor {}] handler exception for msg_type={}: {}",
+                               m_uri.to_string(), msg_type, e.what());
+            } catch (...) {
+                ULTRA_LOG_ERROR("[actor {}] handler exception for msg_type={}: "
+                               "unknown", m_uri.to_string(), msg_type);
+            }
+        } else {
+            // Dead letter: no handler registered for this message type.
+            ULTRA_LOG_WARN("[actor {}] dead letter: no handler for msg_type={} "
+                          "(len={})", m_uri.to_string(), msg_type, len);
         }
     }
 
@@ -94,6 +110,22 @@ public:
     size_t pending() const { return m_pending.load(std::memory_order_acquire); }
     void set_max_per_activation(size_t n) { m_max_per_activation = n; }
 
+    // Signal that the system is shutting down.  Producers should stop
+    // pushing messages after this flag is set.  push_envelope() will
+    // silently drop messages during shutdown to avoid use-after-free.
+    void set_shutting_down(bool v) { m_shutting_down.store(v, std::memory_order_release); }
+    bool is_shutting_down() const { return m_shutting_down.load(std::memory_order_acquire); }
+
+    // Drain the mailbox (blocking).  Called during graceful shutdown
+    // to process any remaining messages before the actor is destroyed.
+    void drain_pending() {
+        auto handler = [this](message_envelope env) {
+            deliver(env.msg_type, env.data.data(), env.data.size());
+        };
+        m_mailbox.drain(handler, size_t(-1));  // drain all
+        m_pending.store(0, std::memory_order_release);
+    }
+
 protected:
     actor_uri m_uri;
     actor_system* m_system = nullptr;
@@ -104,15 +136,32 @@ private:
     std::function<void(std::function<void()>)> m_schedule_fn;
     std::atomic<bool> m_activated{false};
     std::atomic<size_t> m_pending{0};
+    std::atomic<bool> m_shutting_down{false};
     size_t m_max_per_activation = 64;
 };
 
 // ── Inline definitions (require actor_system forward decl) ─────────────
 
 inline void actor_base::push_envelope(message_envelope env) {
-    while (!m_mailbox.try_push(std::move(env))) {
-        std::this_thread::yield();
+    // During shutdown, silently drop messages to avoid use-after-free
+    // (the thread pool may be gone by the time this message is processed).
+    if (m_shutting_down.load(std::memory_order_acquire)) {
+        return;
     }
+
+    // Bounded spin-then-yield: try a few times before yielding the CPU.
+    for (int attempt = 0; attempt < 100; ++attempt) {
+        if (m_mailbox.try_push(env)) {
+            m_pending.fetch_add(1, std::memory_order_release);
+            try_activate();
+            return;
+        }
+        if (attempt >= 10) {
+            std::this_thread::yield();
+        }
+    }
+    // Fallback: block until the push succeeds.
+    m_mailbox.push_blocking(std::move(env));
     m_pending.fetch_add(1, std::memory_order_release);
     try_activate();
 }
@@ -128,14 +177,20 @@ inline bool actor_base::pull_and_run() {
         m_pending.fetch_sub(executed, std::memory_order_release);
     }
     m_activated.store(false, std::memory_order_release);
-    // Self-reactivation: more messages may have arrived during processing.
-    if (m_pending.load(std::memory_order_acquire) > 0) {
+    // Self-reactivation: more messages arrived during processing.
+    // Skip if shutting down — the pool may already be destroyed.
+    if (!m_shutting_down.load(std::memory_order_acquire) &&
+        m_pending.load(std::memory_order_acquire) > 0) {
         try_activate();
     }
     return executed > 0;
 }
 
 inline void actor_base::try_activate() {
+    // Skip activation during shutdown to avoid use-after-free of the pool.
+    if (m_shutting_down.load(std::memory_order_acquire)) {
+        return;
+    }
     bool expected = false;
     if (m_activated.compare_exchange_strong(expected, true,
             std::memory_order_acq_rel)) {
@@ -156,7 +211,9 @@ public:
 
     // Send a message to another actor via its actor_ref.
     template <typename Msg>
-    void send_to(const actor_ref<Derived>& target, const Msg& msg);
+    void send_to(const actor_ref<Derived>& target, const Msg& msg) {
+        target.send(msg);
+    }
 
 protected:
     friend class actor_system;
