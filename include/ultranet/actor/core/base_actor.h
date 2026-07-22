@@ -66,6 +66,7 @@ public:
     // 按类型哈希投递消息到对应处理器。
     // 由 pull_and_run() 在线程池上调用。
     // 内置异常边界：处理器抛出的异常会被捕获并记录，不会导致 actor 崩溃。
+    // 使用限流机制防止异常风暴导致日志爆炸。
     virtual void deliver(uint64_t msg_type, const void* data, size_t len) {
         auto it = m_handlers.find(msg_type);
         if (it != m_handlers.end()) {
@@ -73,8 +74,21 @@ public:
             try {
                 it->second(data, len);
             } catch (const std::exception& e) {
-                ULTRA_LOG_ERROR("[actor {}] handler exception for msg_type={}: {}",
-                               m_uri.to_string(), msg_type, e.what());
+                // 限流：每秒最多记录一次同类型异常
+                uint64_t now = std::chrono::duration_cast<std::chrono::seconds>(
+                    std::chrono::steady_clock::now().time_since_epoch()).count();
+                if (now != m_last_exception_log_sec) {
+                    m_last_exception_log_sec = now;
+                    m_exception_count = 0;
+                }
+                if (m_exception_count++ < 10) {
+                    ULTRA_LOG_ERROR("[actor {}] handler exception for msg_type={}: {}",
+                                   m_uri.to_string(), msg_type, e.what());
+                } else if (m_exception_count == 10) {
+                    ULTRA_LOG_ERROR("[actor {}] handler exception for msg_type={}: "
+                                   "(further exceptions suppressed for this second)",
+                                   m_uri.to_string(), msg_type);
+                }
             } catch (...) {
                 ULTRA_LOG_ERROR("[actor {}] handler exception for msg_type={}: "
                                "unknown", m_uri.to_string(), msg_type);
@@ -145,6 +159,10 @@ private:
     std::atomic<size_t> m_pending{0};
     std::atomic<bool> m_shutting_down{false};
     size_t m_max_per_activation = 64;
+
+    // 异常日志限流：防止异常风暴导致日志爆炸
+    uint64_t m_last_exception_log_sec = 0;
+    int m_exception_count = 0;
 };
 
 // ── 内联实现 ──────────────────────────────────────────────────────────────
