@@ -30,14 +30,13 @@ void test_shutdown_idempotent() {
     PASS();
 }
 
-void test_phase_transitions() {
-    T("phase transitions");
+void test_shutdown_flag() {
+    T("shutdown flag transitions");
     ShutdownCoordinator coord;
-    CHECK(coord.phase() == ShutdownPhase::Running, "initial phase");
+    CHECK(!coord.is_shutdown(), "initially false");
     coord.shutdown();
-    CHECK(coord.phase() == ShutdownPhase::Draining, "draining after shutdown");
-    coord.advance_phase(ShutdownPhase::Complete);
-    CHECK(coord.phase() == ShutdownPhase::Complete, "complete");
+    CHECK(coord.is_shutdown(), "true after shutdown");
+    CHECK(coord.is_shutdown(), "stays true");
     PASS();
 }
 
@@ -118,7 +117,7 @@ int main() {
     std::cout << "=== ShutdownCoordinator Tests ===" << std::endl;
     test_shutdown_sets_flag();
     test_shutdown_idempotent();
-    test_phase_transitions();
+    test_shutdown_flag();
     test_wait_wakes_on_shutdown();
     test_multiple_waiters();
 

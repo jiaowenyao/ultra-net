@@ -161,7 +161,9 @@ inline void actor_base::push_envelope(message_envelope env) {
         }
     }
     // Fallback: block until the push succeeds.
-    m_mailbox.push_blocking(std::move(env));
+    // push_blocking takes a const ref; try_push copies on each retry
+    // but does NOT consume on failure, so env stays intact.
+    m_mailbox.push_blocking(env);
     m_pending.fetch_add(1, std::memory_order_release);
     try_activate();
 }

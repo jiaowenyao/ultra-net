@@ -85,10 +85,11 @@ public:
         return count;
     }
 
-    // Spin until a push succeeds (blocks caller — use only in producer
-    // contexts where blocking is acceptable).
-    void push_blocking(message_envelope env) {
-        while (!m_queue.try_push(std::move(env))) {
+    // Spin until a push succeeds.  Passes env by value each iteration;
+    // MpscQueue::try_push does not consume the argument on failure,
+    // so env remains intact across retries.
+    void push_blocking(const message_envelope& env) {
+        while (!m_queue.try_push(env)) {
             std::this_thread::yield();
         }
     }

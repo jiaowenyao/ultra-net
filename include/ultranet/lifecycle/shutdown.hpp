@@ -4,15 +4,23 @@
 #include "ultranet/utils/noncopyable.h"
 #include <atomic>
 #include <csignal>
-#include <optional>
 
 namespace ynet::async::lifecycle {
 
-enum class ShutdownPhase : uint8_t {
-    Running = 0,
-    Draining,
-    Complete
-};
+// Lightweight shutdown coordinator.
+//
+// Usage:
+//   ShutdownCoordinator sd;
+//   sd.install_signal_handlers();  // optional: Ctrl-C → shutdown
+//
+//   // In accept / processing loops:
+//   while (!sd.is_shutdown()) { ... }
+//
+//   // To wait for shutdown asynchronously:
+//   co_await sd.wait();
+//
+//   // To trigger shutdown:
+//   sd.shutdown();
 
 class ShutdownCoordinator : ynet::utils::Noncopyable {
 public:
@@ -35,30 +43,23 @@ public:
     }
 
     void shutdown() noexcept {
-        ShutdownPhase expected = ShutdownPhase::Running;
-        if (m_phase.compare_exchange_strong(expected, ShutdownPhase::Draining,
+        bool expected = false;
+        if (m_shutdown.compare_exchange_strong(expected, true,
                 std::memory_order_acq_rel)) {
             m_signal.close();
         }
     }
 
     bool is_shutdown() const noexcept {
-        return m_phase.load(std::memory_order_acquire) != ShutdownPhase::Running;
+        return m_shutdown.load(std::memory_order_acquire);
     }
 
-    ShutdownPhase phase() const noexcept {
-        return m_phase.load(std::memory_order_acquire);
-    }
-
-    void advance_phase(ShutdownPhase p) noexcept {
-        m_phase.store(p, std::memory_order_release);
-    }
-
+    // Coroutine-compatible: suspends until shutdown is triggered.
     auto wait() noexcept { return m_signal.read(); }
 
 private:
     Channel<bool, 1> m_signal;
-    std::atomic<ShutdownPhase> m_phase{ShutdownPhase::Running};
+    std::atomic<bool> m_shutdown{false};
     bool m_signals_installed{false};
 
     // Intrusive linked list for safe multi-instance signal handling.
