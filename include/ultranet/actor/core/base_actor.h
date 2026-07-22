@@ -213,7 +213,7 @@ public:
 
     // Send a message to another actor via its actor_ref.
     template <typename Msg>
-    void send_to(const actor_ref<Derived>& target, const Msg& msg) {
+    void send_to(actor_ref<Derived>& target, const Msg& msg) {
         target.send(msg);
     }
 

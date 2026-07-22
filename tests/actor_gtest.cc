@@ -1049,6 +1049,533 @@ TEST(EdgeCaseTest, ActorUriHashInStdContainer) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
+// Transport tests — recv_buffer, outbound_conn, tcp_transport
+// ═══════════════════════════════════════════════════════════════════════
+
+#include <sys/socket.h>
+#include <unistd.h>
+
+using namespace ynet::actor::net;
+using namespace ynet::async;
+using namespace ynet::async::lifecycle;
+using namespace ynet::async::scheduling;
+using namespace ynet::async::io;
+
+TEST(RecvBufferTest, DefaultSize) {
+    recv_buffer buf;
+    EXPECT_NE(buf.data, nullptr);
+    EXPECT_EQ(buf.k_default_size, 256 * 1024);
+}
+
+TEST(RecvBufferTest, CustomSize) {
+    recv_buffer buf(4096);
+    EXPECT_NE(buf.data, nullptr);
+}
+
+TEST(ApplyTcpTuningTest, DoesNotCrashOnValidFd) {
+    int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    ASSERT_GE(fd, 0);
+    apply_tcp_tuning(fd);
+    ::close(fd);
+    SUCCEED();
+}
+
+TEST(OutboundConnTest, ConstructWithValidSocket) {
+    int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    ASSERT_GE(fd, 0);
+    TcpSocket sock(fd);
+    EXPECT_TRUE(sock.is_valid());
+    outbound_conn conn(std::move(sock));
+    EXPECT_TRUE(conn.is_valid());
+}
+
+TEST(OutboundConnTest, CloseInvalidatesConnection) {
+    int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    ASSERT_GE(fd, 0);
+    outbound_conn conn{TcpSocket(fd)};
+    EXPECT_TRUE(conn.is_valid());
+    conn.close();
+    EXPECT_FALSE(conn.is_valid());
+}
+
+TEST(OutboundConnTest, SendAndReceiveViaSocketPair) {
+    // socketpair gives us connected sockets without a real network.
+    int sv[2];
+    ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM, 0, sv), 0);
+
+    // Submit the send on a thread pool (outbound_conn::send is a coroutine).
+    WorkStealingThreadPool pool(1);
+    ExecutionContext::Scope scope(&pool);
+
+    std::vector<uint8_t> received;
+    std::atomic<bool> done{false};
+
+    auto sender = [sv0 = sv[0], &done]() -> Task<void> {
+        outbound_conn conn{TcpSocket(sv0)};
+        std::vector<uint8_t> payload = {0x01, 0x02, 0x03, 0x04};
+        co_await conn.send(payload);
+        done.store(true);
+    };
+
+    pool.submit(sender().release());
+
+    // Read the length-prefixed payload from the other end.
+    uint32_t len = 0;
+    ssize_t n = ::read(sv[1], &len, sizeof(len));
+    EXPECT_EQ(n, static_cast<ssize_t>(sizeof(len)));
+    EXPECT_EQ(len, 4u);
+
+    uint8_t buf[4] = {};
+    n = ::read(sv[1], buf, sizeof(buf));
+    EXPECT_EQ(n, 4);
+    EXPECT_EQ(buf[0], 0x01);
+    EXPECT_EQ(buf[1], 0x02);
+    EXPECT_EQ(buf[2], 0x03);
+    EXPECT_EQ(buf[3], 0x04);
+
+    pool.wait_all();
+    ::close(sv[1]);
+    EXPECT_TRUE(done.load());
+}
+
+TEST(TcpTransportTest, PortConstructor) {
+    tcp_transport t(9000, [](auto) -> Task<void> { co_return; });
+    EXPECT_EQ(t.port(), 9000);
+    EXPECT_EQ(t.actual_port(), 9000);
+}
+
+TEST(TcpTransportTest, PreboundConstructor) {
+    int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    ASSERT_GE(fd, 0);
+    tcp_transport t(fd, 8080, [](auto) -> Task<void> { co_return; });
+    EXPECT_EQ(t.port(), 8080);
+}
+
+TEST(TcpTransportTest, ConnectFailureReturnsNull) {
+    WorkStealingThreadPool pool(1);
+    ExecutionContext::Scope scope(&pool);
+    ShutdownCoordinator sd;
+
+    tcp_transport t(0, [](auto) -> Task<void> { co_return; });
+
+    auto connector = [&]() -> Task<void> {
+        // Connect to an unreachable port.
+        auto conn = co_await t.connect("127.0.0.1", 1);
+        EXPECT_EQ(conn, nullptr);
+    };
+
+    pool.submit(connector().release());
+    pool.wait_all();
+}
+
+// ── Transport integration: serve + connect + message delivery ─────────
+
+TEST(TransportIntegrationTest, ServeAndReceiveMessage) {
+    WorkStealingThreadPool pool(2);
+    ExecutionContext::Scope scope(&pool);
+    ShutdownCoordinator sd;
+
+    std::vector<uint8_t> received_payload;
+    std::atomic<bool> msg_received{false};
+
+    auto handler = [&](std::vector<uint8_t> data) -> Task<void> {
+        received_payload = std::move(data);
+        msg_received.store(true);
+        co_return;
+    };
+
+    // Create transport on port 0 (auto-assign).
+    tcp_transport server(0, handler);
+
+    // Start serve loop.
+    auto serve_task = server.serve(sd);
+    pool.submit(serve_task.release());
+
+    // Give the server a moment to bind and start accepting.
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+    uint16_t actual_port = server.actual_port();
+    ASSERT_GT(actual_port, 0);
+
+    // Connect and send a framed message.
+    auto client = [&]() -> Task<void> {
+        auto conn = co_await server.connect("127.0.0.1", actual_port);
+        if (!conn || !conn->is_valid()) {
+            ADD_FAILURE() << "connect failed";
+            co_return;
+        }
+        // Send a ping-like message payload.
+        std::vector<uint8_t> payload = {'H', 'E', 'L', 'L', 'O'};
+        co_await conn->send(payload);
+    };
+
+    pool.submit(client().release());
+
+    // Wait for the message to arrive.
+    for (int i = 0; i < 100 && !msg_received.load(); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+
+    sd.shutdown();
+    pool.wait_all();
+
+    ASSERT_TRUE(msg_received.load());
+    EXPECT_EQ(received_payload.size(), 5u);
+    EXPECT_EQ(received_payload[0], 'H');
+    EXPECT_EQ(received_payload[1], 'E');
+    EXPECT_EQ(received_payload[2], 'L');
+    EXPECT_EQ(received_payload[3], 'L');
+    EXPECT_EQ(received_payload[4], 'O');
+}
+
+TEST(TransportIntegrationTest, MultipleConnections) {
+    WorkStealingThreadPool pool(2);
+    ExecutionContext::Scope scope(&pool);
+    ShutdownCoordinator sd;
+
+    std::atomic<int> msg_count{0};
+
+    auto handler = [&](std::vector<uint8_t>) -> Task<void> {
+        msg_count.fetch_add(1);
+        co_return;
+    };
+
+    tcp_transport server(0, handler);
+    auto serve_task = server.serve(sd);
+    pool.submit(serve_task.release());
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+    uint16_t port = server.actual_port();
+    ASSERT_GT(port, 0);
+
+    auto sender = [&](int id) -> Task<void> {
+        auto conn = co_await server.connect("127.0.0.1", port);
+        if (!conn) { ADD_FAILURE() << "connect failed"; co_return; }
+        std::vector<uint8_t> p = {static_cast<uint8_t>(id)};
+        co_await conn->send(p);
+    };
+
+    pool.submit(sender(1).release());
+    pool.submit(sender(2).release());
+    pool.submit(sender(3).release());
+
+    for (int i = 0; i < 100 && msg_count.load() < 3; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+
+    sd.shutdown();
+    pool.wait_all();
+
+    EXPECT_GE(msg_count.load(), 3);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// send_to test — actor<T>::send_to(target, msg)
+// ═══════════════════════════════════════════════════════════════════════
+
+class SendToActor : public actor<SendToActor> {
+public:
+    std::atomic<int> received{0};
+    SendToActor() {
+        register_handler<int_msg>([this](const int_msg&) {
+            received.fetch_add(1);
+        });
+    }
+};
+
+TEST(SendToTest, SendToPeerActor) {
+    actor_system sys;
+    auto src = sys.spawn<SendToActor>("src");
+    auto dst = sys.spawn<SendToActor>("dst");
+    ASSERT_TRUE(src.is_valid());
+    ASSERT_TRUE(dst.is_valid());
+
+    auto* src_actor = static_cast<SendToActor*>(src.proxy()->local_actor());
+    src_actor->send_to(dst, int_msg{42});
+
+    auto* dst_actor = static_cast<SendToActor*>(dst.proxy()->local_actor());
+    for (int i = 0; i < 50 && dst_actor->received.load() < 1; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    EXPECT_EQ(dst_actor->received.load(), 1);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Coroutine / IO boundary tests — channel, work stealing, task lifecycle
+// ═══════════════════════════════════════════════════════════════════════
+
+#include "ultranet/coroutine/channel.hpp"
+#include "ultranet/coroutine/queue.hpp"
+#include "ultranet/coroutine/task.hpp"
+
+using namespace ynet::async;
+using namespace ynet::async::scheduling;
+
+// ── Channel tests ────────────────────────────────────────────────────
+
+TEST(ChannelTest, WriteThenRead) {
+    Channel<int, 4> ch;
+    auto write_task = [&]() -> Task<void> {
+        co_await ch.write(42);
+    };
+    auto read_task = [&]() -> Task<void> {
+        auto v = co_await ch.read();
+        EXPECT_TRUE(v.has_value());
+        EXPECT_EQ(*v, 42);
+    };
+
+    WorkStealingThreadPool pool(1);
+    ExecutionContext::Scope scope(&pool);
+    pool.submit(write_task().release());
+    pool.submit(read_task().release());
+    pool.wait_all();
+}
+
+TEST(ChannelTest, CloseWakesReader) {
+    Channel<int, 4> ch;
+    std::atomic<bool> woken{false};
+
+    auto reader = [&]() -> Task<void> {
+        auto v = co_await ch.read();
+        // Channel closed → nullopt
+        EXPECT_FALSE(v.has_value());
+        woken.store(true);
+    };
+
+    WorkStealingThreadPool pool(1);
+    ExecutionContext::Scope scope(&pool);
+    pool.submit(reader().release());
+    // Give reader time to suspend.
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    ch.close();
+    pool.wait_all();
+    EXPECT_TRUE(woken.load());
+}
+
+TEST(ChannelTest, CloseWakesWriter) {
+    Channel<int, 4> ch;
+    std::atomic<bool> woken{false};
+
+    auto writer = [&]() -> Task<void> {
+        co_await ch.write(1);
+        co_await ch.write(2);
+        co_await ch.write(3);
+        co_await ch.write(4);
+        // 5th write blocks (channel full).  close() wakes it — returns false.
+        auto ok = co_await ch.write(5);
+        woken.store(true);
+        // After close(), pending writes return false (or may succeed if
+        // close raced with slot availability).
+        SUCCEED();  // Either outcome is valid — we just verify no hang.
+    };
+
+    WorkStealingThreadPool pool(1);
+    ExecutionContext::Scope scope(&pool);
+    pool.submit(writer().release());
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    ch.close();
+    pool.wait_all();
+    EXPECT_TRUE(woken.load());
+}
+
+TEST(ChannelTest, FullChannel) {
+    // Fill a capacity-2 channel: first 2 writes succeed, 3rd blocks.
+    std::atomic<bool> blocked{false};
+    std::atomic<bool> unblocked{false};
+    Channel<int, 2> ch;
+
+    auto writer = [&]() -> Task<void> {
+        EXPECT_TRUE(co_await ch.write(1));   // slot 1
+        EXPECT_TRUE(co_await ch.write(2));   // slot 2 (full)
+        blocked.store(true);
+        // This write blocks until a reader consumes.
+        EXPECT_TRUE(co_await ch.write(3));
+        unblocked.store(true);
+    };
+
+    auto reader = [&]() -> Task<void> {
+        // Wait for writer to be blocked.
+        while (!blocked.load()) {
+            co_await io::sleep_for(std::chrono::milliseconds(1));
+        }
+        auto v = co_await ch.read();
+        EXPECT_TRUE(v.has_value());
+        EXPECT_EQ(*v, 1);
+    };
+
+    WorkStealingThreadPool pool(1);
+    ExecutionContext::Scope scope(&pool);
+    pool.submit(writer().release());
+    pool.submit(reader().release());
+    pool.wait_all();
+    EXPECT_TRUE(unblocked.load());
+}
+
+// ── WorkStealingQueue tests ──────────────────────────────────────────
+
+TEST(WorkStealingQueueTest, PushPopSingleThread) {
+    WorkStealingQueue<int> q(8);
+    EXPECT_TRUE(q.empty());
+    q.push(42);
+    EXPECT_FALSE(q.empty());
+    EXPECT_EQ(q.size(), 1u);
+    auto v = q.pop();
+    ASSERT_TRUE(v.has_value());
+    EXPECT_EQ(*v, 42);
+    EXPECT_TRUE(q.empty());
+}
+
+TEST(WorkStealingQueueTest, PopEmptyReturnsNullopt) {
+    WorkStealingQueue<int> q(8);
+    EXPECT_FALSE(q.pop().has_value());
+}
+
+TEST(WorkStealingQueueTest, StealEmptyReturnsNullopt) {
+    WorkStealingQueue<int> q(8);
+    EXPECT_FALSE(q.steal().has_value());
+}
+
+TEST(WorkStealingQueueTest, FillAndDrain) {
+    WorkStealingQueue<int> q(8);
+    for (int i = 0; i < 7; ++i) {
+        q.push(i);
+    }
+    EXPECT_EQ(q.size(), 7u);
+    // WorkStealingQueue::pop() is LIFO (stack order).
+    for (int i = 6; i >= 0; --i) {
+        auto v = q.pop();
+        ASSERT_TRUE(v.has_value());
+        EXPECT_EQ(*v, i);
+    }
+    EXPECT_TRUE(q.empty());
+}
+
+TEST(WorkStealingQueueTest, CapacityRoundUp) {
+    WorkStealingQueue<int> q(3);  // 3 → rounds up to 8
+    EXPECT_GE(q.capacity(), 8u);
+}
+
+// ── Task lifecycle tests ─────────────────────────────────────────────
+
+TEST(TaskTest, SimpleCoroutineCompletes) {
+    std::atomic<bool> ran{false};
+    auto task = [&]() -> Task<int> {
+        ran.store(true);
+        co_return 99;
+    };
+
+    WorkStealingThreadPool pool(1);
+    ExecutionContext::Scope scope(&pool);
+    auto t = task();
+    pool.submit(t.release());
+    pool.wait_all();
+    EXPECT_TRUE(ran.load());
+}
+
+TEST(TaskTest, CoAwaitChain) {
+    std::atomic<int> order{0};
+
+    auto inner = [&]() -> Task<int> {
+        order.store(1);
+        co_return 10;
+    };
+    auto outer = [&]() -> Task<int> {
+        order.store(2);
+        int v = co_await inner();
+        order.store(3);
+        co_return v + 1;
+    };
+
+    WorkStealingThreadPool pool(1);
+    ExecutionContext::Scope scope(&pool);
+    auto t = outer();
+    pool.submit(t.release());
+    pool.wait_all();
+    EXPECT_EQ(order.load(), 3);
+}
+
+TEST(TaskTest, ExceptionInCoroutine) {
+    auto throwing = []() -> Task<void> {
+        throw std::runtime_error("test error");
+        co_return;
+    };
+
+    WorkStealingThreadPool pool(1);
+    ExecutionContext::Scope scope(&pool);
+    auto t = throwing();
+    pool.submit(t.release());
+    pool.wait_all();
+    // The exception is caught by TaskFinalAwaiter and logged to stderr.
+    // The test passes if the pool doesn't deadlock/crash.
+    SUCCEED();
+}
+
+// ── IO edge case tests ───────────────────────────────────────────────
+
+TEST(IoEdgeTest, SocketCreation) {
+    auto sock = Socket(AF_INET, SOCK_STREAM, 0);
+    // Socket is an IoOperation; co_await it.
+    auto test = [&]() -> Task<void> {
+        auto result = co_await Socket(AF_INET, SOCK_STREAM, 0);
+        EXPECT_TRUE(result.has_value());
+        int fd = *result;
+        EXPECT_GE(fd, 0);
+        co_await Close(fd);
+    };
+
+    WorkStealingThreadPool pool(1);
+    ExecutionContext::Scope scope(&pool);
+    pool.submit(test().release());
+    pool.wait_all();
+}
+
+TEST(IoEdgeTest, CloseInvalidFd) {
+    auto test = []() -> Task<void> {
+        // Closing an invalid fd should return an error, not crash.
+        auto result = co_await Close(-1);
+        EXPECT_FALSE(result.has_value());
+    };
+
+    WorkStealingThreadPool pool(1);
+    ExecutionContext::Scope scope(&pool);
+    pool.submit(test().release());
+    pool.wait_all();
+}
+
+TEST(IoEdgeTest, TimeoutOnAccept) {
+    auto test = []() -> Task<void> {
+        // Create a listening socket with no incoming connections.
+        auto sock_fd = co_await Socket(AF_INET, SOCK_STREAM, 0);
+        if (!sock_fd.has_value()) { ADD_FAILURE() << "socket failed"; co_return; }
+        int fd = *sock_fd;
+
+        int opt = 1;
+        setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+        sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_port = 0;
+        addr.sin_addr.s_addr = INADDR_ANY;
+        co_await Bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
+        co_await Listen(fd, 1);
+
+        // Accept with 50ms timeout — should timeout, not hang.
+        Accept acceptor(fd);
+        acceptor.with_timeout(std::chrono::milliseconds(50));
+        auto result = co_await acceptor;
+        // Timeout returns error.
+        EXPECT_FALSE(result.has_value());
+
+        co_await Close(fd);
+    };
+
+    WorkStealingThreadPool pool(1);
+    ExecutionContext::Scope scope(&pool);
+    pool.submit(test().release());
+    pool.wait_all();
+}
+
+// ═══════════════════════════════════════════════════════════════════════
 // Main
 // ═══════════════════════════════════════════════════════════════════════
 

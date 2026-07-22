@@ -68,7 +68,7 @@ public:
     }
 
     bool is_valid() const { return m_valid && m_sock.is_valid(); }
-    void close() { m_sock.close(); }
+    void close() { m_valid = false; m_sock.close(); }
 };
 
 // TCP transport: listens for connections and dispatches framed messages.
