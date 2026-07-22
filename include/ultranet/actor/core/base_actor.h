@@ -1,6 +1,6 @@
-// actor<T> — CRTP base class for the actor framework.
-// Inherit from this to turn your class into a distributed actor.
-// All infrastructure (socket, scheduler, discovery) is handled internally.
+// actor<T> — actor 框架的 CRTP 基类。
+// 继承此类即可将任意类变为分布式 actor，所有基础设施（socket、调度器、
+// 服务发现）由框架内部处理，对用户透明。
 #pragma once
 
 #include <string>
@@ -21,22 +21,24 @@ namespace ynet::actor {
 class actor_system;
 template <typename T> class actor_ref;
 
-// ── Message handler type ────────────────────────────────────────────────
+// ── 消息处理器类型 ────────────────────────────────────────────────────────
 
 using message_handler_t = std::function<void(const void* data, size_t len)>;
 
-// ── Base class for all actors ──────────────────────────────────────────
+// ── actor 基类 ────────────────────────────────────────────────────────────
 
 class actor_base {
 public:
     actor_base() = default;
     virtual ~actor_base() = default;
 
+    // ── 基本属性 ─────────────────────────────────────────────────────────
+
     void set_uri(const actor_uri& u) { m_uri = u; }
     void set_system(actor_system* s) { m_system = s; }
 
-    // Set the scheduling callback used by try_activate().
-    // Called by actor_system during spawn() to wire up the thread pool.
+    // 设置调度回调，由 actor_system::spawn() 调用，将 actor 与线程池绑定。
+    // try_activate() 通过此回调将 pull_and_run() 提交到线程池执行。
     void set_schedule_fn(std::function<void(std::function<void()>)> fn) {
         m_schedule_fn = std::move(fn);
     }
@@ -45,13 +47,14 @@ public:
     actor_system* system() const { return m_system; }
     std::string name() const { return m_uri.name; }
 
-    // ── Handler registration ───────────────────────────────────────────
+    // ── 消息处理器注册 ───────────────────────────────────────────────────
 
-    // Register a handler for a specific message type.
-    // Usage: register_handler<my_msg>([](const my_msg& m) { ... });
+    // 为指定消息类型注册处理器。
+    // 用法：register_handler<my_msg>([](const my_msg& m) { ... });
     template <typename Msg>
     void register_handler(std::function<void(const Msg&)> handler) {
         uint64_t hash = actor_type_hash<Msg>();
+        // 用 lambda 包装用户处理器，提供类型安全的数据转换
         m_handlers[hash] = [handler = std::move(handler)](const void* data, size_t len) {
             if (len >= sizeof(Msg)) {
                 const Msg* msg = static_cast<const Msg*>(data);
@@ -60,17 +63,16 @@ public:
         };
     }
 
-    // Deliver a message to this actor by type hash.
-    // Called from pull_and_run() on the thread pool.
-    // Wrapped in an error boundary: if a handler throws, the exception is
-    // caught and logged, and the actor continues processing.
+    // 按类型哈希投递消息到对应处理器。
+    // 由 pull_and_run() 在线程池上调用。
+    // 内置异常边界：处理器抛出的异常会被捕获并记录，不会导致 actor 崩溃。
     virtual void deliver(uint64_t msg_type, const void* data, size_t len) {
         auto it = m_handlers.find(msg_type);
         if (it != m_handlers.end()) {
+            // 找到已注册的处理器，在异常边界内调用
             try {
                 it->second(data, len);
             } catch (const std::exception& e) {
-                // Log and continue — one bad handler shouldn't kill the actor.
                 ULTRA_LOG_ERROR("[actor {}] handler exception for msg_type={}: {}",
                                m_uri.to_string(), msg_type, e.what());
             } catch (...) {
@@ -78,51 +80,56 @@ public:
                                "unknown", m_uri.to_string(), msg_type);
             }
         } else {
-            // Dead letter: no handler registered for this message type.
+            // 死信：该消息类型没有注册处理器
             ULTRA_LOG_WARN("[actor {}] dead letter: no handler for msg_type={} "
                           "(len={})", m_uri.to_string(), msg_type, len);
         }
     }
 
-    // Check if a handler is registered for the given type.
+    // 检查是否已注册指定消息类型的处理器。
     template <typename Msg>
     bool handles() const {
         return m_handlers.find(actor_type_hash<Msg>()) != m_handlers.end();
     }
 
-    // ── Async mailbox interface ────────────────────────────────────────
+    // ── 异步 mailbox 接口 ─────────────────────────────────────────────────
 
-    // Push a pre-built envelope into the mailbox and try to activate.
-    // Called by local_actor_proxy::deliver() (and eventually by the
-    // inbound network handler for remote messages).
+    // 将消息信封推入 mailbox 并尝试激活 actor。
+    // 由 local_actor_proxy::deliver() 和远端消息入口调用。
     void push_envelope(message_envelope env);
 
-    // Pull messages from the mailbox and dispatch them.
-    // Runs on the thread pool.  Returns true if any messages were processed.
+    // 从 mailbox 中拉取消息并分发给处理器。
+    // 在线程池上运行，返回是否处理了任何消息。
     bool pull_and_run();
 
-    // Activate this actor: schedule pull_and_run() on the thread pool.
-    // Uses CAS to guarantee only one execution instance at a time.
+    // 激活 actor：将 pull_and_run() 通过 schedule_fn 提交到线程池。
+    // 使用 CAS 保证同一时刻只有一个执行实例。
     void try_activate();
 
-    // Accessors for the mailbox (used by proxies and integration tests).
+    // ── Mailbox 访问器 ────────────────────────────────────────────────────
+
     mailbox& get_mailbox() { return m_mailbox; }
     size_t pending() const { return m_pending.load(std::memory_order_acquire); }
     void set_max_per_activation(size_t n) { m_max_per_activation = n; }
 
-    // Signal that the system is shutting down.  Producers should stop
-    // pushing messages after this flag is set.  push_envelope() will
-    // silently drop messages during shutdown to avoid use-after-free.
-    void set_shutting_down(bool v) { m_shutting_down.store(v, std::memory_order_release); }
-    bool is_shutting_down() const { return m_shutting_down.load(std::memory_order_acquire); }
+    // ── 关闭流程 ──────────────────────────────────────────────────────────
 
-    // Drain the mailbox (blocking).  Called during graceful shutdown
-    // to process any remaining messages before the actor is destroyed.
+    // 标记关闭状态。设置后 push_envelope() 会丢弃消息，try_activate()
+    // 不再重新调度，防止线程池销毁后的 use-after-free。
+    void set_shutting_down(bool v) {
+        m_shutting_down.store(v, std::memory_order_release);
+    }
+    bool is_shutting_down() const {
+        return m_shutting_down.load(std::memory_order_acquire);
+    }
+
+    // 同步排空 mailbox 中剩余消息（阻塞调用）。
+    // 在优雅关闭时使用：线程池已停止，在销毁 actor 之前处理最后的消息。
     void drain_pending() {
         auto handler = [this](message_envelope env) {
             deliver(env.msg_type, env.data.data(), env.data.size());
         };
-        m_mailbox.drain(handler, size_t(-1));  // drain all
+        m_mailbox.drain(handler, size_t(-1));
         m_pending.store(0, std::memory_order_release);
     }
 
@@ -140,47 +147,56 @@ private:
     size_t m_max_per_activation = 64;
 };
 
-// ── Inline definitions (require actor_system forward decl) ─────────────
+// ── 内联实现 ──────────────────────────────────────────────────────────────
 
 inline void actor_base::push_envelope(message_envelope env) {
-    // During shutdown, silently drop messages to avoid use-after-free
-    // (the thread pool may be gone by the time this message is processed).
+    // 关闭期间静默丢弃消息，防止线程池已销毁后的 use-after-free
     if (m_shutting_down.load(std::memory_order_acquire)) {
         return;
     }
 
-    // Bounded spin-then-yield: try a few times before yielding the CPU.
+    // 有界自旋后让出 CPU：先尝试若干次，失败后逐步降低抢占频率
     for (int attempt = 0; attempt < 100; ++attempt) {
         if (m_mailbox.try_push(env)) {
+            // push 成功：更新待处理计数并激活 actor
             m_pending.fetch_add(1, std::memory_order_release);
             try_activate();
             return;
         }
+        // 前 10 次忙等，之后每次让出 CPU 时间片
         if (attempt >= 10) {
             std::this_thread::yield();
         }
     }
-    // Fallback: block until the push succeeds.
-    // push_blocking takes a const ref; try_push copies on each retry
-    // but does NOT consume on failure, so env stays intact.
+    // 回退路径：阻塞直到 push 成功（极端背压场景）
+    // push_blocking 接收 const 引用，每次重试由 try_push 内部拷贝，
+    // 失败时不消费原数据，所以 env 始终保持完整
     m_mailbox.push_blocking(env);
     m_pending.fetch_add(1, std::memory_order_release);
     try_activate();
 }
 
 inline bool actor_base::pull_and_run() {
+    // 计算本次激活允许处理的最大消息数
     size_t limit = std::min(m_max_per_activation,
                             m_pending.load(std::memory_order_acquire));
+
+    // 构造分发 lambda：将 mailbox 中的消息投递给 deliver()
     auto handler = [this](message_envelope env) {
         deliver(env.msg_type, env.data.data(), env.data.size());
     };
+
+    // 批量排空 mailbox
     size_t executed = m_mailbox.drain(handler, limit);
     if (executed > 0) {
         m_pending.fetch_sub(executed, std::memory_order_release);
     }
+
+    // 释放激活锁，允许新的 try_activate 调度
     m_activated.store(false, std::memory_order_release);
-    // Self-reactivation: more messages arrived during processing.
-    // Skip if shutting down — the pool may already be destroyed.
+
+    // 自激活检查：处理期间可能有新消息到达
+    // 关闭期间跳过，防止线程池已销毁后的 use-after-free
     if (!m_shutting_down.load(std::memory_order_acquire) &&
         m_pending.load(std::memory_order_acquire) > 0) {
         try_activate();
@@ -189,13 +205,16 @@ inline bool actor_base::pull_and_run() {
 }
 
 inline void actor_base::try_activate() {
-    // Skip activation during shutdown to avoid use-after-free of the pool.
+    // 关闭期间跳过调度，防止线程池销毁后的 use-after-free
     if (m_shutting_down.load(std::memory_order_acquire)) {
         return;
     }
+
+    // CAS 保证同一时刻只有一个线程成功激活
     bool expected = false;
     if (m_activated.compare_exchange_strong(expected, true,
             std::memory_order_acq_rel)) {
+        // 通过系统调度回调将 pull_and_run 提交到线程池
         if (m_schedule_fn) {
             m_schedule_fn([this]() {
                 pull_and_run();
@@ -204,14 +223,14 @@ inline void actor_base::try_activate() {
     }
 }
 
-// ── CRTP actor base ────────────────────────────────────────────────────
+// ── CRTP actor 模板 ───────────────────────────────────────────────────────
 
 template <typename Derived>
 class actor : public actor_base {
 public:
     using base_type = actor<Derived>;
 
-    // Send a message to another actor via its actor_ref.
+    // 向另一个 actor 发送消息（通过 actor_ref）
     template <typename Msg>
     void send_to(actor_ref<Derived>& target, const Msg& msg) {
         target.send(msg);

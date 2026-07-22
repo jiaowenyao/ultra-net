@@ -1,6 +1,6 @@
-// mailbox — lock-free MPSC message queue with backpressure detection.
-// Each actor owns one mailbox; producers push message_envelope objects,
-// the actor's scheduler drains them in batches.
+// mailbox — 无锁 MPSC 消息队列，带背压检测。
+// 每个 actor 持有一个 mailbox；生产者推入 message_envelope，
+// actor 的调度器批量排空。多生产者-单消费者（MPSC）模式。
 #pragma once
 
 #include <cstdint>
@@ -16,14 +16,14 @@ namespace ynet::actor {
 
 using ynet::async::scheduling::MpscQueue;
 
-// ── Message envelope ────────────────────────────────────────────────────
-// Carries a serialised message payload tagged with its type hash.
-// Always owns its storage (data is copied in).
+// ── 消息信封 ──────────────────────────────────────────────────────────────
+// 携带序列化的消息负载及其类型哈希。始终拥有自己的存储（数据在构造时拷贝）。
 
 struct message_envelope {
     uint64_t             msg_type = 0;
     std::vector<uint8_t> data;
 
+    // 从消息实例构造信封（memcpy 拷贝消息体）
     template <typename Msg>
     static message_envelope make(const Msg& msg) {
         message_envelope env;
@@ -34,9 +34,9 @@ struct message_envelope {
     }
 };
 
-// ── Mailbox ─────────────────────────────────────────────────────────────
-// Wraps a fixed-capacity MpscQueue.  Multi-producer, single consumer.
-// Provides backpressure detection and batch-drain helpers.
+// ── Mailbox ───────────────────────────────────────────────────────────────
+// 封装固定容量的 MpscQueue。多生产者，单消费者。
+// 提供背压检测和批量排空辅助方法。
 
 class mailbox {
 public:
@@ -45,17 +45,17 @@ public:
 
     mailbox() = default;
 
-    // Push a message.  Returns false if the queue is full (backpressure).
+    // 推入一条消息。队列满时返回 false（触发背压）。
     bool try_push(message_envelope env) {
         return m_queue.try_push(std::move(env));
     }
 
-    // Pop one message.  Returns nullopt when empty.
+    // 弹出一条消息。队列空时返回 nullopt。
     std::optional<message_envelope> try_pop() {
         return m_queue.try_pop();
     }
 
-    // Approximate number of messages waiting.
+    // 近似消息数量（用于监控和背压判断）
     size_t approximate_size() const {
         return m_queue.approximate_size();
     }
@@ -64,13 +64,13 @@ public:
         return m_queue.empty();
     }
 
-    // True when the queue is above the backpressure threshold.
+    // 队列是否超过背压阈值（默认 80% 容量）
     bool is_backpressure() const {
         return approximate_size() > (k_default_capacity * k_backpressure_pct / 100);
     }
 
-    // Drain up to max_count messages, invoking handler for each.
-    // Returns the number of messages actually processed.
+    // 批量排空最多 max_count 条消息，每条调用 handler 处理。
+    // 返回实际处理的消息数。
     template <typename Func>
     size_t drain(Func&& handler, size_t max_count) {
         size_t count = 0;
@@ -85,9 +85,8 @@ public:
         return count;
     }
 
-    // Spin until a push succeeds.  Passes env by value each iteration;
-    // MpscQueue::try_push does not consume the argument on failure,
-    // so env remains intact across retries.
+    // 阻塞直到 push 成功。接收 const 引用，每次重试由 MpscQueue::try_push
+    // 内部拷贝；失败时不消费原数据，调用方的 env 对象始终保持完整。
     void push_blocking(const message_envelope& env) {
         while (!m_queue.try_push(env)) {
             std::this_thread::yield();

@@ -1,3 +1,25 @@
+// Launcher — 轻量级应用启动器，封装 ultra-net 应用的样板代码：
+// 信号处理、线程池创建、上下文绑定、任务提交和阻塞等待。
+//
+// 典型用法：
+//   1. 零配置（自由函数）:
+//        return launch([](ShutdownCoordinator& sd) -> Task<void> {
+//            co_await my_server(8080, sd);
+//        });
+//
+//   2. 流式配置:
+//        return Launcher()
+//            .threads(4)
+//            .run([](ShutdownCoordinator& sd) -> Task<void> {
+//                co_await my_server(8080, sd);
+//            });
+//
+//   3. 每线程运行（SO_REUSEPORT 多线程 accept）:
+//        return Launcher()
+//            .threads(4)
+//            .run_per_thread([](int tid, ShutdownCoordinator& sd) -> Task<void> {
+//                co_await my_server(tid, sd);
+//            });
 #pragma once
 
 #include "ultranet/coroutine/thread_pool.hpp"
@@ -8,48 +30,22 @@
 
 namespace ynet::async {
 
-// Lightweight launcher that wraps the boilerplate of starting an ultra-net
-// application: signal handling, thread pool creation, scope binding, task
-// submission, and blocking until completion.
-//
-// Two common patterns:
-//
-//   1. Zero-config (free function):
-//        int main() {
-//            return launch([](ShutdownCoordinator& shutdown) -> Task<void> {
-//                co_await my_server(8080, shutdown);
-//            });
-//        }
-//
-//   2. Fluent configuration:
-//        int main() {
-//            return Launcher()
-//                .threads(4)
-//                .run([](ShutdownCoordinator& shutdown) -> Task<void> {
-//                    co_await my_server(8080, shutdown);
-//                });
-//        }
-//
-// The old explicit pattern still works for users who need full control:
-//   ShutdownCoordinator + WorkStealingThreadPool + Scope + submit + wait_all
-
 class Launcher {
 public:
-    // Set the number of worker threads (default: hardware_concurrency).
+    // 设置工作线程数（默认：hardware_concurrency）
     Launcher& threads(size_t n) noexcept {
         m_threads = n;
         return *this;
     }
 
-    // Set io_uring engine configuration.
+    // 设置 io_uring 引擎配置
     Launcher& io_uring_config(const io::IoUringEngineConfig& cfg) noexcept {
         m_io_config = cfg;
         return *this;
     }
 
-    // Run a server function that participates in graceful shutdown.
-    // The callable receives a ShutdownCoordinator& for checking is_shutdown()
-    // in accept/processing loops.
+    // 运行接收 ShutdownCoordinator 的服务函数。
+    // fn 接收 ShutdownCoordinator&，在 accept/处理循环中检查 is_shutdown()。
     template <typename F>
         requires std::is_invocable_r_v<Task<void>, F, lifecycle::ShutdownCoordinator&>
     int run(F&& fn) {
@@ -58,7 +54,9 @@ public:
         try {
             scheduling::WorkStealingThreadPool pool(m_threads, m_io_config);
             ExecutionContext::Scope scope(&pool);
+            // 提交用户协程到线程池
             pool.submit(fn(shutdown).release());
+            // 阻塞直到所有任务完成或收到关闭信号
             pool.wait_all();
         } catch (const std::exception& e) {
             std::cerr << "Fatal: " << e.what() << std::endl;
@@ -67,9 +65,9 @@ public:
         return 0;
     }
 
-    // Run one instance of fn on EACH worker thread, pinned to that thread.
-    // fn(thread_id, shutdown) -> Task<void> is called once per thread.
-    // This enables SO_REUSEPORT multi-threaded accept and per-thread state.
+    // 在每个工作线程上运行一个 fn 实例（线程绑定）。
+    // fn(thread_id, shutdown) → Task<void>，每个线程调用一次。
+    // 适用于 SO_REUSEPORT 多线程 accept 和每线程状态管理。
     template <typename F>
         requires std::is_invocable_r_v<Task<void>, F, int, lifecycle::ShutdownCoordinator&>
     int run_per_thread(F&& fn) {
@@ -78,6 +76,7 @@ public:
         try {
             scheduling::WorkStealingThreadPool pool(m_threads, m_io_config);
             ExecutionContext::Scope scope(&pool);
+            // 将每线程协程固定到对应的 worker 线程
             for (size_t i = 0; i < m_threads; ++i) {
                 pool.submit_on_thread(i,
                     fn(static_cast<int>(i), shutdown).release());
@@ -95,8 +94,8 @@ private:
     io::IoUringEngineConfig m_io_config{};
 };
 
-// Zero-configuration entry point.  Equivalent to Launcher().run(fn).
-// Automatically detects whether fn accepts a ShutdownCoordinator&.
+// 零配置入口。等价于 Launcher().run(fn)。
+// 自动检测 fn 是否接受 ShutdownCoordinator& 参数。
 template <typename F>
 inline int launch(F&& fn) {
     return Launcher().run(

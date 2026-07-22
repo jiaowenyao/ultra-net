@@ -1,6 +1,5 @@
-// Binary serialization for actor messages over the network.
-// Provides a simple network-byte-order serializer plus wire-envelope
-// helpers for packing/unpacking actor messages for TCP transport.
+// 二进制序列化 — actor 消息的网络传输编码/解码。
+// 提供网络字节序的序列化器，以及用于 TCP 传输的消息信封打包/解包辅助函数。
 #pragma once
 
 #include <cstdint>
@@ -14,15 +13,15 @@
 
 namespace ynet::actor::dist {
 
-// ── Message type discriminator (first byte of every transport payload) ──
+// ── 消息类型鉴别（传输负载的第一个字节）─────────────────────────────────
 
 enum class message_type : uint8_t {
-    gossip          = 0x01,
-    actor_message   = 0x02,
-    actor_location  = 0x03,
+    gossip          = 0x01,  // 集群 gossip 消息
+    actor_message   = 0x02,  // actor 到 actor 的消息
+    actor_location  = 0x03,  // actor 位置通告
 };
 
-// ── Binary serializer (network byte order) ─────────────────────────────
+// ── 二进制序列化器（网络字节序）─────────────────────────────────────────
 
 class serializer {
 public:
@@ -30,7 +29,7 @@ public:
     explicit serializer(std::vector<uint8_t> buf)
         : m_data(std::move(buf)) {}
 
-    // ── Write primitives ──────────────────────────────────────────────
+    // ── 写入原语 ──────────────────────────────────────────────────────
 
     void write_u8(uint8_t v) {
         m_data.push_back(v);
@@ -49,7 +48,7 @@ public:
     }
 
     void write_u64(uint64_t v) {
-        // No standard htonll — write big-endian manually.
+        // 无标准 htonll，手动写入大端序
         m_data.push_back(static_cast<uint8_t>((v >> 56) & 0xFF));
         m_data.push_back(static_cast<uint8_t>((v >> 48) & 0xFF));
         m_data.push_back(static_cast<uint8_t>((v >> 40) & 0xFF));
@@ -87,7 +86,7 @@ public:
         write_u8(static_cast<uint8_t>(t));
     }
 
-    // ── Read primitives ──────────────────────────────────────────────
+    // ── 读取原语 ──────────────────────────────────────────────────────
 
     uint8_t read_u8() {
         if (m_offset >= m_data.size()) {
@@ -120,7 +119,7 @@ public:
         if (m_offset + sizeof(uint64_t) > m_data.size()) {
             return 0;
         }
-        // Big-endian manual decode.
+        // 大端序手动解码
         const uint8_t* p = m_data.data() + m_offset;
         uint64_t v = (static_cast<uint64_t>(p[0]) << 56)
                    | (static_cast<uint64_t>(p[1]) << 48)
@@ -151,9 +150,6 @@ public:
     std::string read_string() {
         uint32_t len = read_u32();
         if (len == 0 || m_offset + len > m_data.size()) {
-            if (len == 0) {
-                return {};
-            }
             return {};
         }
         std::string s(reinterpret_cast<const char*>(m_data.data() + m_offset), len);
@@ -173,7 +169,7 @@ public:
         return static_cast<message_type>(read_u8());
     }
 
-    // ── State ────────────────────────────────────────────────────────
+    // ── 状态查询 ──────────────────────────────────────────────────────
 
     const std::vector<uint8_t>& data() const { return m_data; }
     std::vector<uint8_t> consume() { return std::move(m_data); }
@@ -186,26 +182,27 @@ private:
     size_t m_offset = 0;
 };
 
-// ── Wire envelope helpers ───────────────────────────────────────────────
+// ── 线格式信封辅助函数 ───────────────────────────────────────────────────
 //
-// Actor message envelope (type = 0x02):
-//   type:1      — always 0x02
-//   uri_len:4   — length of target URI string (net order)
-//   uri:var     — UTF-8 actor URI
-//   msg_hash:8  — FNV-1a type hash (net order)
-//   payload_len:4 — length of serialized message (net order)
-//   payload:var — serialized message body
+// actor 消息信封（type = 0x02）:
+//   type:1       — 固定 0x02
+//   uri_len:4    — 目标 URI 字符串长度（网络序）
+//   uri:var      — UTF-8 actor URI
+//   msg_hash:8   — FNV-1a 类型哈希（网络序）
+//   payload_len:4 — 序列化消息体长度（网络序）
+//   payload:var  — 序列化消息体
 //
-// Actor location announce (type = 0x03):
-//   type:1      — always 0x03
-//   uri_len:4   — length of URI string (net order)
-//   uri:var     — UTF-8 actor URI
-//   ttl:4       — remaining hop count (net order)
+// actor 位置通告（type = 0x03）:
+//   type:1       — 固定 0x03
+//   uri_len:4    — URI 字符串长度（网络序）
+//   uri:var      — UTF-8 actor URI
+//   ttl:4        — 剩余跳数（网络序）
 
-// Shared URI parser: "ultra://node/type/name" → actor_uri.
+// 从线格式 URI 字符串解析 actor_uri（unpack 共用辅助函数）
 inline actor_uri parse_uri_from_wire(const std::string& uri_str) {
     actor_uri out;
-    auto first_slash = uri_str.find('/', 8);  // skip "ultra://"
+    // 格式: "ultra://node/type/name"，跳过 "ultra://"
+    auto first_slash = uri_str.find('/', 8);
     auto second_slash = uri_str.find('/', first_slash + 1);
     if (first_slash != std::string::npos && second_slash != std::string::npos) {
         out.node = uri_str.substr(8, first_slash - 8);
@@ -219,6 +216,7 @@ inline actor_uri parse_uri_from_wire(const std::string& uri_str) {
     return out;
 }
 
+// 打包 actor 消息为线格式
 inline std::vector<uint8_t> pack_actor_message(const actor_uri& target_uri,
                                                 uint64_t msg_type_hash,
                                                 const void* payload,
@@ -232,6 +230,7 @@ inline std::vector<uint8_t> pack_actor_message(const actor_uri& target_uri,
     return s.consume();
 }
 
+// 从线格式解包 actor 消息
 inline bool unpack_actor_message(const uint8_t* data, size_t len,
                                   actor_uri& out_uri,
                                   uint64_t& out_msg_type,
@@ -258,8 +257,9 @@ inline bool unpack_actor_message(const uint8_t* data, size_t len,
     return true;
 }
 
-// ── Actor location announce ─────────────────────────────────────────────
+// ── Actor 位置通告 ────────────────────────────────────────────────────────
 
+// 打包 actor 位置为线格式
 inline std::vector<uint8_t> pack_actor_location(const actor_uri& uri,
                                                  uint32_t ttl = 10) {
     serializer s;
@@ -269,6 +269,7 @@ inline std::vector<uint8_t> pack_actor_location(const actor_uri& uri,
     return s.consume();
 }
 
+// 从线格式解包 actor 位置通告
 inline bool unpack_actor_location(const uint8_t* data, size_t len,
                                    actor_uri& out_uri,
                                    uint32_t& out_ttl) {

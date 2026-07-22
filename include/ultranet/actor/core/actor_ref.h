@@ -1,6 +1,6 @@
-// actor_ref<T> — type-safe, location-transparent handle to an actor.
-// Supports send() for fire-and-forget and call() for request-reply.
-// Works identically for local and remote actors.
+// actor_ref<T> — 类型安全、位置透明的 actor 句柄。
+// 支持 send()（fire-and-forget）和 try_send()（非阻塞）。
+// 对本地和远端 actor 提供统一接口，调用方无需关心 actor 的物理位置。
 #pragma once
 
 #include <memory>
@@ -17,7 +17,7 @@ namespace ynet::actor {
 class actor_system;
 class actor_base;
 
-// ── Internal proxy: hides local/remote distinction ────────────────────
+// ── 内部代理：隐藏本地/远端差异 ──────────────────────────────────────────
 
 class actor_proxy {
 public:
@@ -27,15 +27,15 @@ public:
     virtual actor_base* local_actor() { return nullptr; }
 };
 
-// ── Local actor proxy: pushes to mailbox and activates actor ──────────
-// Zero serialization overhead — message is copied into a message_envelope
-// and pushed directly into the actor's mailbox.
+// ── 本地 actor 代理 ───────────────────────────────────────────────────────
+// 零序列化开销：消息直接拷贝到 message_envelope 并推入 actor mailbox。
 
 class local_actor_proxy : public actor_proxy {
 public:
     local_actor_proxy(actor_base* a, actor_system* sys)
         : m_actor(a), m_system(sys) {}
 
+    // 将消息拷贝到信封并推入目标 actor 的 mailbox
     void deliver(uint64_t msg_type, const void* data, size_t len) override {
         message_envelope env;
         env.msg_type = msg_type;
@@ -50,6 +50,7 @@ public:
         return m_actor->uri();
     }
 
+    // 获取本地 actor 裸指针（用于测试和内部访问）
     actor_base* local_actor() override {
         return m_actor;
     }
@@ -59,7 +60,7 @@ private:
     actor_system* m_system;
 };
 
-// ── Type-safe actor reference ─────────────────────────────────────────
+// ── 类型安全的 actor 引用 ─────────────────────────────────────────────────
 
 template <typename T>
 class actor_ref {
@@ -72,10 +73,11 @@ public:
     const actor_uri& uri() const { return m_uri; }
     std::string name() const { return m_uri.name; }
 
-    // Fire-and-forget: push a message into the actor's mailbox.
-    // The message is delivered asynchronously via the thread pool.
-    // If the mailbox is under backpressure, this call may block briefly
-    // (bounded spin + yield); for a non-blocking variant, use try_send().
+    // ── 消息发送 ─────────────────────────────────────────────────────────
+
+    // Fire-and-forget 发送：消息异步投递到线程池上的 mailbox。
+    // 如果 mailbox 处于背压状态，调用可能短暂阻塞（有界自旋+让出CPU），
+    // 需要非阻塞版本请使用 try_send()。
     template <typename Msg>
     void send(const Msg& msg) {
         if (m_proxy) {
@@ -84,19 +86,21 @@ public:
         }
     }
 
-    // Non-blocking send: returns false if the mailbox is full (backpressure).
-    // Only meaningful for local actors; remote proxies always buffer.
+    // 非阻塞发送：mailbox 满时返回 false（背压信号），不阻塞调用方。
+    // 仅对本地 actor 有效；远端代理始终缓冲消息，不受 mailbox 容量限制。
     template <typename Msg>
     bool try_send(const Msg& msg) {
-        if (!m_proxy) return false;
+        if (!m_proxy) {
+            return false;
+        }
         auto* local = m_proxy->local_actor();
         if (!local) {
-            // Remote proxy: fall back to fire-and-forget (always buffered).
+            // 远端代理：退化为 fire-and-forget（始终缓冲）
             uint64_t hash = actor_type_hash<Msg>();
             m_proxy->deliver(hash, &msg, sizeof(msg));
             return true;
         }
-        // Local actor: try non-blocking push.
+        // 本地 actor：尝试非阻塞推入 mailbox
         auto envelope = message_envelope::make(msg);
         if (local->get_mailbox().try_push(std::move(envelope))) {
             local->try_activate();
@@ -105,7 +109,8 @@ public:
         return false;
     }
 
-    // Internal accessors.
+    // ── 内部访问器 ───────────────────────────────────────────────────────
+
     std::shared_ptr<actor_proxy> proxy() const { return m_proxy; }
 
 private:

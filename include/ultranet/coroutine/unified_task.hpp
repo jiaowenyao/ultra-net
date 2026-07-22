@@ -1,3 +1,9 @@
+// UnifiedTask — 统一的协程/函数任务包装器。
+// 使用 std::variant 统一存储 std::coroutine_handle<> 和 std::function<void()>，
+// 让线程池可以用同一个队列处理协程任务和普通回调。
+//
+// operator() 恢复协程执行或调用函数。协程完成后（done() == true），
+// 自动调用 destroy() 释放协程帧，防止内存泄漏。
 #pragma once
 #include <coroutine>
 #include <functional>
@@ -24,10 +30,12 @@ class UnifiedTask {
 public:
     UnifiedTask() = default;
 
+    // 从协程句柄构造
     template <typename Promise>
     UnifiedTask(std::coroutine_handle<Promise> handle) noexcept
         : m_task(std::coroutine_handle<>(handle)) {}
 
+    // 从可调用对象构造（SFINAE 排除 UnifiedTask 自身和协程句柄）
     template <typename Func>
         requires(std::is_invocable_v<std::decay_t<Func>>
                 && !std::is_same_v<std::decay_t<Func>, UnifiedTask>
@@ -40,20 +48,24 @@ public:
     UnifiedTask(const UnifiedTask&) = delete;
     UnifiedTask& operator=(const UnifiedTask&) = delete;
 
+    // 执行任务：恢复协程或调用函数。
+    // 对于协程句柄：恢复后检查 done()，若已完成则销毁协程帧防止内存泄漏。
     void operator()() {
         std::visit([](auto& task) {
             using T = std::decay_t<decltype(task)>;
             if constexpr (std::is_same_v<T, std::coroutine_handle<>>) {
                 if (task && !task.done()) {
                     task.resume();
-                    // If the coroutine reached its final suspend point,
-                    // destroy the frame now to prevent memory leaks.
+                    // 协程到达最终挂起点后 done() 为 true，
+                    // 此时必须显式销毁协程帧以释放内存
                     if (task.done()) {
                         task.destroy();
                     }
                 }
             } else {
-                if (task) task();
+                if (task) {
+                    task();
+                }
             }
         }, m_task);
     }

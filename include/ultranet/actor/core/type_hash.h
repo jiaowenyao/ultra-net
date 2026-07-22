@@ -1,17 +1,17 @@
-// Compile-time type hash for actor message dispatch.
+// 编译期类型哈希 — 用于 actor 消息分发。
 //
-// By default, uses FNV-1a over typeid(T).name(), which is consistent within
-// a single build but NOT across compilers or compiler versions.
+// 默认使用 typeid(T).name() 的 FNV-1a 哈希，在同一构建内一致，
+// 但不同编译器或编译器版本间不保证稳定。
 //
-// For distributed use (where messages may cross compiler boundaries),
-// annotate message types with a stable string tag:
+// 在分布式场景下（消息可能跨越编译器边界），消息类型应标注稳定的字符串标签：
 //
 //   struct ping_msg {
 //       static constexpr const char* actor_type = "ping";
 //       int id;
 //   };
 //
-// The tag is hashed via FNV-1a, making it stable across compilers.
+// 框架通过 C++20 requires 表达式在编译期检测 T::actor_type 是否存在，
+// 若存在则使用标签字符串的哈希，保证跨编译器稳定性。
 #pragma once
 
 #include <cstdint>
@@ -20,7 +20,7 @@
 namespace ynet::actor {
 
 namespace detail {
-    // FNV-1a hash of a string.
+    // FNV-1a 哈希常量与计算
     inline constexpr uint64_t fnv1a(const char* s) {
         uint64_t h = 14695981039346656037ULL;
         while (*s) {
@@ -31,16 +31,14 @@ namespace detail {
     }
 }
 
-// Primary template: use typeid(T).name() (compiler-dependent).
+// 主模板：优先使用用户提供的稳定标签，退化为编译器相关名称
 template <typename T>
 inline uint64_t actor_type_hash() {
-    // Detect if T::actor_type exists at compile time.
     if constexpr (requires { T::actor_type; }) {
-        // Use the stable user-provided tag.
-        // constexpr evaluation ensures zero runtime cost.
+        // 编译期常量求值，零运行时开销
         return detail::fnv1a(T::actor_type);
     } else {
-        // Fallback: compiler-dependent name.
+        // 回退：编译器相关的 typeid 名称
         const char* name = typeid(T).name();
         uint64_t h = 14695981039346656037ULL;
         while (*name) {
