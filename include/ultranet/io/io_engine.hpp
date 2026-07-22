@@ -175,8 +175,25 @@ public:
     io_uring* get_ring() noexcept { return &m_ring; }
     bool is_valid() const noexcept { return m_ring.ring_fd >= 0; }
 
-    BufferGroup& register_buffer_group(unsigned gid, size_t entries = 1024, size_t buf_size = 4096);
-    void* get_buffer(unsigned gid, unsigned bid) noexcept;
+    BufferGroup& register_buffer_group(unsigned gid, size_t entries = 1024,
+                                        size_t buf_size = 4096) {
+        auto it = m_buffer_groups.find(gid);
+        if (it != m_buffer_groups.end()) {
+            return *it->second;
+        }
+        auto group = std::make_unique<BufferGroup>(gid, entries, buf_size, &m_ring);
+        auto* ptr = group.get();
+        m_buffer_groups[gid] = std::move(group);
+        return *ptr;
+    }
+
+    void* get_buffer(unsigned gid, unsigned bid) noexcept {
+        auto it = m_buffer_groups.find(gid);
+        if (it != m_buffer_groups.end()) {
+            return it->second->get_buffer(bid);
+        }
+        return nullptr;
+    }
 
 private:
     explicit IoUringEngine(const Config& config)
@@ -203,7 +220,13 @@ private:
         }
     }
 
-    ~IoUringEngine();  // defined in src/io_engine.cc
+    ~IoUringEngine() {
+        if (m_ring.ring_fd >= 0) {
+            io_uring_submit(&m_ring);
+            m_buffer_groups.clear();
+            io_uring_queue_exit(&m_ring);
+        }
+    }
 
     IoUringEngine(const IoUringEngine&) = delete;
     IoUringEngine& operator=(const IoUringEngine&) = delete;

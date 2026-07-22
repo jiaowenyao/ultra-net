@@ -1,11 +1,11 @@
 {
     "schema_version": 2,
-    "commit": "7917df75f4e4b6e5004d07a063362b3606cda027",
-    "indexed_at": "2026-07-22T17:15:53Z",
+    "commit": "ec099499e6dac03d3dee95c0042c75a103072019",
+    "indexed_at": "2026-07-22T17:28:15Z",
     "project": "home-jwy-workspace-ultra-net",
-    "nodes": 3163,
-    "edges": 11904,
-    "original_size": 11665408,
-    "compressed_size": 2116416,
+    "nodes": 3085,
+    "edges": 11741,
+    "original_size": 11534336,
+    "compressed_size": 2082999,
     "compression_level": 3
 }

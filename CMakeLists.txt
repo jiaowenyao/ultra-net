@@ -48,87 +48,28 @@ else()
     pkg_check_modules(spdlog QUIET spdlog)
 endif()
 
-# Create ultranet library (99% header-only; buffer.cc handles io_uring registration)
-set(ULTRANET_SOURCES
-    src/io_engine.cc
-    src/actor_system.cc
-)
-
-# Headers that users need (exposed via include/ultranet/)
-set(ULTRANET_PUBLIC_HEADERS
-    include/ultranet/coroutine/scheduler.h
-    include/ultranet/coroutine/execution_context.hpp
-    include/ultranet/coroutine/task.hpp
-    include/ultranet/coroutine/thread_pool.hpp
-    include/ultranet/coroutine/queue.hpp
-    include/ultranet/coroutine/unified_task.hpp
-    include/ultranet/coroutine/mpsc_queue.hpp
-    include/ultranet/coroutine/channel.hpp
-    include/ultranet/io/io_engine.hpp
-    include/ultranet/io/io_awaitable.hpp
-    include/ultranet/io/timer.hpp
-    include/ultranet/io/io_callback.hpp
-    include/ultranet/io/reactor.hpp
-    include/ultranet/buffer/buffer.h
-    include/ultranet/net/socket.hpp
-    include/ultranet/net/bind.hpp
-    include/ultranet/net/listen.hpp
-    include/ultranet/net/accept.hpp
-    include/ultranet/net/read.hpp
-    include/ultranet/net/write.hpp
-    include/ultranet/net/close.hpp
-    include/ultranet/net/connect.hpp
-    include/ultranet/net/sendto.hpp
-    include/ultranet/net/recvfrom.hpp
-    include/ultranet/net/shutdown.hpp
-    include/ultranet/net/dns.hpp
-    include/ultranet/net/error.hpp
-    include/ultranet/net/tcp_socket.hpp
-    include/ultranet/coroutine/when_all.hpp
-    include/ultranet/coroutine/circuit_breaker.hpp
-    include/ultranet/coroutine/retry.hpp
-    include/ultranet/lifecycle/shutdown.hpp
-    include/ultranet/config/config.hpp
-    include/ultranet/net/connection_pool.hpp
-    include/ultranet/net/http.hpp
-    include/ultranet/net/websocket.hpp
-    include/ultranet/net/service_discovery.hpp
-    include/ultranet/metrics/counter.hpp
-    include/ultranet/metrics/gauge.hpp
-    include/ultranet/metrics/histogram.hpp
-    include/ultranet/metrics/registry.hpp
-    include/ultranet/log/logger.hpp
-    include/ultranet/trace/span.hpp
-    include/ultranet/actor.hpp
-    include/ultranet/actor/core/actor_uri.h
-    include/ultranet/actor/core/base_actor.h
-    include/ultranet/actor/core/actor_ref.h
-    include/ultranet/actor/system/actor_system.h
-    include/ultranet/actor/net/transport.h
-    include/ultranet/actor/net/cluster.h
-)
-
-add_library(ultranet ${ULTRANET_SOURCES} ${ULTRANET_PUBLIC_HEADERS})
+# ultranet — header-only library (all implementations are inline)
+add_library(ultranet INTERFACE)
 
 target_include_directories(ultranet
-    PUBLIC
+    INTERFACE
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<INSTALL_INTERFACE:include>
         ${liburing_INCLUDE_DIRS}
 )
 
 target_link_libraries(ultranet
-    PUBLIC
+    INTERFACE
         ${liburing_LIBRARIES}
 )
 
 if(spdlog_FOUND)
-    target_link_libraries(ultranet PUBLIC spdlog::spdlog)
-    target_compile_definitions(ultranet PUBLIC ULTRANET_HAS_SPDLOG=1)
+    target_link_libraries(ultranet INTERFACE spdlog::spdlog)
+    target_compile_definitions(ultranet INTERFACE ULTRANET_HAS_SPDLOG=1)
 endif()
 
 target_compile_definitions(ultranet
-    PUBLIC
+    INTERFACE
         ULTRANET_VERSION_MAJOR=${PROJECT_VERSION_MAJOR}
         ULTRANET_VERSION_MINOR=${PROJECT_VERSION_MINOR}
         ULTRANET_VERSION_PATCH=${PROJECT_VERSION_PATCH}
@@ -183,12 +124,7 @@ install(FILES
         ultranet/net/http.hpp
         ultranet/net/websocket.hpp
         ultranet/net/service_discovery.hpp
-        ultranet/metrics/counter.hpp
-        ultranet/metrics/gauge.hpp
-        ultranet/metrics/histogram.hpp
-        ultranet/metrics/registry.hpp
         ultranet/log/logger.hpp
-        ultranet/trace/span.hpp
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/ultranet
 )
 

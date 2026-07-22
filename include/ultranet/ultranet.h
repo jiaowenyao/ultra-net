@@ -55,12 +55,7 @@
 #include "ultranet/net/http.hpp"
 #include "ultranet/net/websocket.hpp"
 #include "ultranet/net/service_discovery.hpp"
-#include "ultranet/metrics/counter.hpp"
-#include "ultranet/metrics/gauge.hpp"
-#include "ultranet/metrics/histogram.hpp"
-#include "ultranet/metrics/registry.hpp"
 #include "ultranet/log/logger.hpp"
-#include "ultranet/trace/span.hpp"
 
 // Version information
 #define ULTRANET_VERSION_MAJOR 0

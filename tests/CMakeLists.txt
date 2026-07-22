@@ -30,9 +30,7 @@ set(TEST_SOURCES
     dns_test.cc
     udp_test.cc
     channel_test.cc
-    metrics_test.cc
     log_test.cc
-    trace_test.cc
     tcp_socket_test.cc
     when_all_test.cc
     when_any_test.cc
