@@ -158,7 +158,7 @@ private:
     std::atomic<bool> m_activated{false};
     std::atomic<size_t> m_pending{0};
     std::atomic<bool> m_shutting_down{false};
-    size_t m_max_per_activation = 64;
+    size_t m_max_per_activation = 256;
 
     // 异常日志限流：防止异常风暴导致日志爆炸
     uint64_t m_last_exception_log_sec = 0;
@@ -173,22 +173,30 @@ inline void actor_base::push_envelope(message_envelope env) {
         return;
     }
 
-    // 有界自旋后让出 CPU：先尝试若干次，失败后逐步降低抢占频率
-    for (int attempt = 0; attempt < 100; ++attempt) {
+    // 自适应退避：忙等 → yield → 微秒级睡眠 → 阻塞回退
+    // 参考 LMAX Disruptor SleepingWaitStrategy
+    for (int attempt = 0; attempt < 200; ++attempt) {
         if (m_mailbox.try_push(env)) {
             // push 成功：更新待处理计数并激活 actor
             m_pending.fetch_add(1, std::memory_order_release);
             try_activate();
             return;
         }
-        // 前 10 次忙等，之后每次让出 CPU 时间片
-        if (attempt >= 10) {
+        // 退避策略：0-9 忙等, 10-49 yield, 50-99 睡眠1μs,
+        // 100-149 睡眠10μs, 150-199 睡眠100μs
+        if (attempt < 10) {
+            // 忙等（预期 mailbox 很快就会有空位）
+        } else if (attempt < 50) {
             std::this_thread::yield();
+        } else if (attempt < 100) {
+            std::this_thread::sleep_for(std::chrono::microseconds(1));
+        } else if (attempt < 150) {
+            std::this_thread::sleep_for(std::chrono::microseconds(10));
+        } else {
+            std::this_thread::sleep_for(std::chrono::microseconds(100));
         }
     }
     // 回退路径：阻塞直到 push 成功（极端背压场景）
-    // push_blocking 接收 const 引用，每次重试由 try_push 内部拷贝，
-    // 失败时不消费原数据，所以 env 始终保持完整
     m_mailbox.push_blocking(env);
     m_pending.fetch_add(1, std::memory_order_release);
     try_activate();

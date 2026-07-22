@@ -33,7 +33,7 @@ struct system_config {
     uint16_t listen_port = 0;           // 0 = auto-assign
     std::string node_name = "default";
     std::vector<std::string> seed_nodes;
-    size_t max_per_activation = 64;
+    size_t max_per_activation = 256;
     uint64_t gossip_interval_ms = 1000;
     uint64_t node_timeout_ms = 3000;
 };
@@ -211,7 +211,8 @@ private:
         const actor_uri& uri, net::node_id_t node_id);
     void publish_actor_location(const actor_uri& uri);
     ynet::async::Task<void> connect_to_node(
-        net::node_id_t node_id, const std::string& host, uint16_t port);
+        net::node_id_t node_id, const std::string& host, uint16_t port,
+        std::shared_ptr<net::outbound_conn> existing_conn = nullptr);
 };
 
 // ── Inline implementations ──────────────────────────────────────────────
@@ -382,11 +383,13 @@ inline ynet::async::Task<void> actor_system::gossip_loop() {
                 if (colon != std::string::npos) {
                     std::string host = addr.substr(0, colon);
                     uint16_t port = static_cast<uint16_t>(std::stoi(addr.substr(colon + 1)));
-                    auto conn = co_await m_transport->connect(host, port);
-                    if (conn && conn->is_valid()) {
-                        co_await conn->send(payload);
-                        co_await connect_to_node(peers[i].id, host, port);
-                    }
+                    // 建立连接 → 发送gossip → 复用为持久连接（避免重复建连）
+                auto conn = co_await m_transport->connect(host, port);
+                if (conn && conn->is_valid()) {
+                    co_await conn->send(payload);
+                    // 将 gossip 连接复用为持久连接，connect_to_node 不再重复建连
+                    co_await connect_to_node(peers[i].id, host, port, conn);
+                }
                 }
             }
         }
@@ -431,16 +434,32 @@ inline void actor_system::publish_actor_location(const actor_uri& uri) {
 }
 
 inline ynet::async::Task<void> actor_system::connect_to_node(
-        net::node_id_t node_id, const std::string& host, uint16_t port) {
+        net::node_id_t node_id, const std::string& host, uint16_t port,
+        std::shared_ptr<net::outbound_conn> existing_conn) {
     if (!m_transport) { co_return; }
+
+    // 复用已有连接（由 gossip_loop 传入，避免重复建连）
+    auto conn = std::move(existing_conn);
+    if (!conn || !conn->is_valid()) {
+        // 检查是否已有持久连接
+        {
+            std::lock_guard<std::mutex> lock(m_conn_mutex);
+            auto it = m_connections.find(node_id);
+            if (it != m_connections.end() && it->second->is_valid()) {
+                co_return;  // 已有有效连接
+            }
+        }
+        conn = co_await m_transport->connect(host, port);
+        if (!conn || !conn->is_valid()) { co_return; }
+    }
+
+    // 存储持久连接
     {
         std::lock_guard<std::mutex> lock(m_conn_mutex);
-        auto it = m_connections.find(node_id);
-        if (it != m_connections.end() && it->second->is_valid()) { co_return; }
+        m_connections[node_id] = conn;
     }
-    auto conn = co_await m_transport->connect(host, port);
-    if (!conn || !conn->is_valid()) { co_return; }
 
+    // 排空目标为该节点的缓冲消息
     std::shared_ptr<dist::remote_proxy> proxy;
     {
         std::lock_guard<std::mutex> lock(m_proxy_mutex);
@@ -448,10 +467,6 @@ inline ynet::async::Task<void> actor_system::connect_to_node(
         if (it != m_remote_proxies.end()) {
             proxy = std::dynamic_pointer_cast<dist::remote_proxy>(it->second);
         }
-    }
-    {
-        std::lock_guard<std::mutex> lock(m_conn_mutex);
-        m_connections[node_id] = conn;
     }
     if (proxy) { proxy->connect_and_flush(conn); }
 }

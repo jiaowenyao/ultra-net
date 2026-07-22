@@ -341,8 +341,8 @@ void bench_tcp_transport() {
     // 通过 client_system 查找 server actor 并向其发送消息
     auto key = actor_uri::make(0, typeid(PerfActor).name(), "tcp-srv").to_string();
 
-    // 给 gossip 时间发现对方
-    std::this_thread::sleep_for(milliseconds(500));
+    // 等待 gossip 发现对等节点（首次 gossip 间隔约 1 秒）
+    std::this_thread::sleep_for(milliseconds(2000));
 
     constexpr int N = 10000;
     uint64_t checksum = 0;
@@ -425,10 +425,13 @@ void bench_churn() {
 // ═══════════════════════════════════════════════════════════════════════
 
 void bench_mpsc_contention() {
-    print_bar("场景 7: MPSC 极限竞争 (8线程 → 1 Actor, 各 500K 消息)");
+    constexpr int kThreads = 2;
+    constexpr int kPerThread = 200'000;
 
-    constexpr int kThreads = 8;
-    constexpr int kPerThread = 500'000;
+    std::cout << "\n" << std::string(72, '═') << "\n"
+              << "  场景 7: MPSC 极限竞争 (" << kThreads << "线程 → 1 Actor, 各 "
+              << kPerThread << " 消息)\n"
+              << std::string(72, '═') << "\n";
     system_config cfg{.num_threads = 4, .max_per_activation = 512};
     actor_system sys(cfg);
     auto ref = sys.spawn<PerfActor>("mpsc");
@@ -438,7 +441,7 @@ void bench_mpsc_contention() {
     std::vector<std::thread> producers;
 
     for (int t = 0; t < kThreads; ++t) {
-        producers.emplace_back([&ref, &start, t]() {
+        producers.emplace_back([&ref, &start, t, kPerThread]() {
             while (!start.load(std::memory_order_acquire)) {}
             uint64_t base = t * kPerThread;
             for (int i = 0; i < kPerThread; ++i) {

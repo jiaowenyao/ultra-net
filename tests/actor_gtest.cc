@@ -145,7 +145,7 @@ TEST(ActorSystemTest, ConfigDefaults) {
     system_config cfg;
     EXPECT_EQ(cfg.num_threads, 4);
     EXPECT_EQ(cfg.node_name, "default");
-    EXPECT_EQ(cfg.max_per_activation, 64);
+    EXPECT_EQ(cfg.max_per_activation, 256u);
     EXPECT_EQ(cfg.gossip_interval_ms, 1000);
 }
 
