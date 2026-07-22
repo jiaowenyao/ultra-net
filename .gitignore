@@ -50,3 +50,12 @@ install_manifest.txt
 
 
 .cache/
+
+# AI 辅助编程
+.claude/
+.codebase-memory/
+.claude-code/
+.codex/
+.cursor/
+.copilot/
+*.memory/
