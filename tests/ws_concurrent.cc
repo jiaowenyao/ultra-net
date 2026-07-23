@@ -44,6 +44,7 @@ Task<void> ws_echo_per_thread(int tid, uint16_t port, ShutdownCoordinator& sd) {
                 websocket::WebSocket ws(std::move(cs));
                 char buf[4096];
                 Read reader(ws.socket().fd(), buf, sizeof(buf));
+                reader.with_timeout(std::chrono::seconds(5));
                 auto r = co_await reader;
                 if (!r || *r == 0) { co_return; }
                 http::HttpRequest req;
