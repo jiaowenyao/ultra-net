@@ -58,7 +58,9 @@ public:
 
     void await_suspend(std::coroutine_handle<> handle) noexcept {
         m_callback.m_handle = handle;
-        if (!m_is_parent) return;
+        if (!m_is_parent) {
+            return;
+        }
 
         auto* ctx = IoUringEngine::current();
 
@@ -110,7 +112,9 @@ public:
     }
 
     void resubmit() override {
-        if (!m_is_parent) return;
+        if (!m_is_parent) {
+            return;
+        }
 
         if (m_callback.m_has_deadline && m_callback.is_expired()) {
             m_callback.m_result = -ETIMEDOUT;
@@ -120,7 +124,9 @@ public:
             }
             if (m_callback.m_handle) {
                 auto* sched = ExecutionContext::current();
-                if (sched) sched->resubmit(m_callback.m_handle);
+                if (sched) {
+                sched->resubmit(m_callback.m_handle);
+            }
             }
             return;
         }
@@ -136,7 +142,9 @@ public:
             }
             if (m_callback.m_handle) {
                 auto* sched = ExecutionContext::current();
-                if (sched) sched->resubmit(m_callback.m_handle);
+                if (sched) {
+                sched->resubmit(m_callback.m_handle);
+            }
             }
             return;
         }

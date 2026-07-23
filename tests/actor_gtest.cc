@@ -1614,9 +1614,11 @@ TEST(SerializeTest, CustomSerializeRoundTrip) {
 
     complex_msg msg{42, "hello-serialize"};
     ref.send(msg);
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
     auto* a = static_cast<ComplexActor*>(ref.proxy()->local_actor());
+    for (int w = 0; w < 50 && a->received < 1; ++w) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
     ASSERT_EQ(a->received, 1);
     EXPECT_EQ(a->last_msg.id, 42);
     EXPECT_EQ(a->last_msg.name, "hello-serialize");
@@ -1626,8 +1628,10 @@ TEST(SerializeTest, TriviallyCopyableStillWorks) {
     actor_system sys({.num_threads = 2});
     auto ref = sys.spawn<CountingActor>("normal");
     ref.send(int_msg{99});
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
     auto* a = static_cast<CountingActor*>(ref.proxy()->local_actor());
+    for (int w = 0; w < 50 && a->received.load() < 1; ++w) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
     EXPECT_EQ(a->received.load(), 1);
 }
 

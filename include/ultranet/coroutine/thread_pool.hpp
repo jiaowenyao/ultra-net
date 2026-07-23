@@ -141,7 +141,9 @@ public:
     }
 
     void submit_coroutine(std::coroutine_handle<> handle) {
-        if (!handle || handle.done()) return;
+        if (!handle || handle.done()) {
+            return;
+        }
         auto typed = std::coroutine_handle<TaskPromiseBase>::from_address(handle.address());
         auto& promise = typed.promise();
         promise.m_notify_fn = &WorkStealingThreadPool::on_task_complete;
@@ -155,7 +157,9 @@ public:
     // The coroutine always executes on thread `worker_id`, keeping its
     // io_uring operations local to that thread's ring.
     void submit_on_thread(size_t worker_id, std::coroutine_handle<> handle) {
-        if (!handle || handle.done()) return;
+        if (!handle || handle.done()) {
+            return;
+        }
         auto typed = std::coroutine_handle<TaskPromiseBase>::from_address(handle.address());
         auto& promise = typed.promise();
         promise.m_notify_fn = &WorkStealingThreadPool::on_task_complete;
@@ -175,7 +179,9 @@ public:
     }
 
     void resubmit_coroutine(std::coroutine_handle<> handle) {
-        if (!handle || handle.done()) return;
+        if (!handle || handle.done()) {
+            return;
+        }
         UnifiedTask task(handle);
         enqueue_task(std::move(task));
     }
@@ -270,14 +276,18 @@ private:
 
     bool try_steal_task(size_t thief_id, std::optional<UnifiedTask>& task) {
         size_t num = m_workers.size();
-        if (num <= 1) return false;
+        if (num <= 1) {
+            return false;
+        }
 
         static thread_local std::mt19937 rng(std::random_device{}());
         std::uniform_int_distribution<size_t> dist(0, num - 1);
         size_t start = dist(rng);
         for (size_t i = 0; i < num; ++i) {
             size_t victim = (start + i) % num;
-            if (victim == thief_id) continue;
+            if (victim == thief_id) {
+                continue;
+            }
             if (auto t = m_local_queues[victim]->steal()) {
                 task = std::move(*t);
                 return true;
@@ -297,7 +307,9 @@ private:
     static void on_io_completion(void* ctx, io_uring_cqe* cqe) {
         auto* pool = static_cast<WorkStealingThreadPool*>(ctx);
         auto* callback = reinterpret_cast<io::IoCallback*>(io_uring_cqe_get_data(cqe));
-        if (!callback) return;
+        if (!callback) {
+            return;
+        }
 
         // Multishot: one SQE → many CQEs. Dispatch to custom handler,
         // do NOT touch m_result/m_completed/pending_ops.
@@ -319,7 +331,9 @@ private:
             }
         } else if (callback->m_handle) {
             auto* engine = io::IoUringEngine::current();
-            if (engine) engine->decrement_pending_ops();
+            if (engine) {
+                engine->decrement_pending_ops();
+            }
             pool->record_completion();
             pool->resubmit_coroutine(callback->m_handle);
             // 清除句柄——防止同一 callback 的后续 CQE 将已完成的协程二次入队。
@@ -340,9 +354,18 @@ private:
             reactor.poll();
 
             std::optional<UnifiedTask> task;
-            if ((task = try_get_local_task(worker_id))) { (*task)(); continue; }
-            if (try_steal_task(worker_id, task)) { (*task)(); continue; }
-            if (try_get_from_mpsc(worker_id, task)) { (*task)(); continue; }
+            if ((task = try_get_local_task(worker_id))) {
+                (*task)();
+                continue;
+            }
+            if (try_steal_task(worker_id, task)) {
+                (*task)();
+                continue;
+            }
+            if (try_get_from_mpsc(worker_id, task)) {
+                (*task)();
+                continue;
+            }
 
             reactor.wait_for_events();
         }
