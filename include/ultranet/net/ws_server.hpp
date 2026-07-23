@@ -148,36 +148,39 @@ private:
     // Ping/Pong 由框架自动处理，用户只需关注 Text/Binary 帧。
 
     Task<void> handle_client(int client_fd) {
+        // 1. 创建 WebSocket 并读取 HTTP upgrade 请求
         TcpSocket sock(client_fd);
         websocket::WebSocket ws(std::move(sock));
 
-        // 1. 读取并解析 HTTP upgrade 请求
         char buf[4096];
-        Read reader(client_fd, buf, sizeof(buf));
+        Read reader(ws.socket().fd(), buf, sizeof(buf));
         reader.with_timeout(std::chrono::seconds(5));
         auto r = co_await reader;
-        if (!r || *r == 0) { co_await Close(client_fd); co_return; }
+        if (!r || *r == 0) { co_return; }  // fd 由 ws 析构关闭
 
+        // 2. 解析 HTTP 升级请求
         http::HttpRequest req;
-        if (req.parse(buf, static_cast<size_t>(*r)) == 0) {
-            co_await Close(client_fd); co_return;
-        }
+        if (req.parse(buf, static_cast<size_t>(*r)) == 0) { co_return; }
 
-        // 2. WebSocket 握手
-        if (co_await ws.accept(req)) { co_await Close(client_fd); co_return; }
+        // 3. 完成 WebSocket 握手（发送 HTTP 101 响应）
+        auto ec = co_await ws.accept(req);
+        if (ec) {
+            ULTRA_LOG_WARN("[ws_server] handshake failed: {}", ec.message());
+            co_return;
+        }
 
         WsConn conn(std::move(ws));
 
-        // 3. 通知用户连接建立
+        // 4. 通知用户连接建立
         if (m_on_open) { co_await m_on_open(conn); }
 
-        // 4. 读帧主循环
+        // 5. 读帧主循环
         co_await read_loop(conn);
 
-        // 5. 通知用户连接关闭
+        // 6. 通知用户连接关闭
         conn.m_open = false;
         if (m_on_close) { co_await m_on_close(conn); }
-        co_await Close(client_fd);
+        // fd 由 conn → WebSocket → TcpSocket 析构链自动关闭
     }
 
     // ── 帧读循环 ────────────────────────────────────────────────────
