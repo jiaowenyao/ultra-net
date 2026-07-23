@@ -322,6 +322,9 @@ private:
             if (engine) engine->decrement_pending_ops();
             pool->record_completion();
             pool->resubmit_coroutine(callback->m_handle);
+            // 清除句柄——防止同一 callback 的后续 CQE 将已完成的协程二次入队。
+            // 协程帧在 TaskFinalAwaiter 或 ~Task() 中销毁后，再次访问句柄即 UB。
+            callback->m_handle = nullptr;
         }
     }
 

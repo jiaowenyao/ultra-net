@@ -49,18 +49,14 @@ public:
     UnifiedTask& operator=(const UnifiedTask&) = delete;
 
     // 执行任务：恢复协程或调用函数。
-    // 对于协程句柄：恢复后检查 done()，若已完成则销毁协程帧防止内存泄漏。
+    // 注意：协程帧的销毁由 TaskFinalAwaiter / Task<T> 生命周期管理，
+    // UnifiedTask 只负责执行，不参与所有权。
     void operator()() {
         std::visit([](auto& task) {
             using T = std::decay_t<decltype(task)>;
             if constexpr (std::is_same_v<T, std::coroutine_handle<>>) {
                 if (task && !task.done()) {
                     task.resume();
-                    // 协程到达最终挂起点后 done() 为 true，
-                    // 此时必须显式销毁协程帧以释放内存
-                    if (task.done()) {
-                        task.destroy();
-                    }
                 }
             } else {
                 if (task) {

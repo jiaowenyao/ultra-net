@@ -77,7 +77,7 @@ struct TaskPromiseBase {
                 return parent;
             }
 
-            // 4. 无父协程（顶层任务）：记录未捕获异常后返回 noop
+            // 4. 无父协程（顶层任务 / release）→ 记录异常并自行销毁帧
             if (promise.m_ex != nullptr) [[unlikely]] {
                 try {
                     std::rethrow_exception(promise.m_ex);
@@ -89,6 +89,10 @@ struct TaskPromiseBase {
                     ULTRA_LOG_ERROR("coroutine exception: unknown");
                 }
             }
+
+            // 无等待者——最终挂起点自行释放协程帧。
+            // 有父协程的路径在 if(parent) 分支中对称转移，由父 Task 析构负责销毁。
+            callee.destroy();
             return std::noop_coroutine();
         }
 
