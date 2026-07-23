@@ -29,15 +29,40 @@ struct TaskPromiseBase {
 
     TaskPromiseBase() = default;
 
-    // 强制堆分配，阻止编译器 HALO 优化将协程帧放在栈上。
-    // 协程帧必须在堆上，才能在调度器中安全地在线程间传递。
+    // ── 协程帧池 ──────────────────────────────────────────────────────────
+    // 线程局部空闲链表：避免每次 co_await 都调用 malloc/free。
+    // 最近释放的帧被缓存，下次同大小分配时直接复用。池上限 16 帧/大小。
+    // 超过上限或大小不匹配时回退到 ::operator new/delete。
+
     static void* operator new(std::size_t size) {
+        auto& pool = t_frame_pool;
+        // 查找同大小的空闲帧
+        for (auto& slot : pool) {
+            if (slot.ptr && slot.size == size) {
+                void* p = slot.ptr;
+                slot.ptr = nullptr;
+                return p;
+            }
+        }
         return ::operator new(size);
     }
-    static void operator delete(void* ptr, std::size_t /*size*/) {
+
+    static void operator delete(void* ptr, std::size_t size) {
+        auto& pool = t_frame_pool;
+        // 尝试放入空闲槽位
+        for (auto& slot : pool) {
+            if (!slot.ptr) {
+                slot.ptr = ptr;
+                slot.size = size;
+                return;
+            }
+        }
+        // 池满或未找到空槽位，直接释放
         ::operator delete(ptr);
     }
+
     static void operator delete(void* ptr) {
+        // 无 size 信息的 delete 直接释放（不常见路径）
         ::operator delete(ptr);
     }
 
@@ -118,6 +143,10 @@ struct TaskPromiseBase {
     std::exception_ptr m_ex{nullptr};
     NotifyFn m_notify_fn{nullptr};
     void* m_notify_ctx{nullptr};
+
+    // 线程局部帧池（每线程最多缓存 8 个不同大小的帧）
+    struct FrameSlot { void* ptr = nullptr; std::size_t size = 0; };
+    static thread_local FrameSlot t_frame_pool[8];
 };
 
 // ── 有返回值 Promise ──────────────────────────────────────────────────────
@@ -314,5 +343,8 @@ inline Task<T> TaskPromise<T>::get_return_object() noexcept {
 inline Task<void> TaskPromise<void>::get_return_object() noexcept {
     return Task<void>(std::coroutine_handle<TaskPromise>::from_promise(*this));
 }
+
+// ── 线程局部帧池 ──────────────────────────────────────────────────────────
+inline thread_local TaskPromiseBase::FrameSlot TaskPromiseBase::t_frame_pool[8];
 
 } // namespace ynet::async
