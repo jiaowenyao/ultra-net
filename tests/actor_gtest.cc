@@ -1632,6 +1632,67 @@ TEST(SerializeTest, TriviallyCopyableStillWorks) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
+// Launcher auto-detect tests
+// ═══════════════════════════════════════════════════════════════════════
+
+#include "ultranet/coroutine/launcher.hpp"
+#include <atomic>
+
+TEST(LauncherTest, RunWithoutShutdownCoordinator) {
+    std::atomic<bool> ran{false};
+    int result = Launcher().threads(1).run([&]() -> Task<void> {
+        ran.store(true);
+        co_return;
+    });
+    EXPECT_EQ(result, 0);
+    EXPECT_TRUE(ran.load());
+}
+
+TEST(LauncherTest, RunWithShutdownCoordinator) {
+    std::atomic<bool> ran{false};
+    int result = Launcher().threads(1).run(
+        [&](ShutdownCoordinator& sd) -> Task<void> {
+            EXPECT_FALSE(sd.is_shutdown());
+            ran.store(true);
+            co_return;
+        });
+    EXPECT_EQ(result, 0);
+    EXPECT_TRUE(ran.load());
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// WebSocket Server tests
+// ═══════════════════════════════════════════════════════════════════════
+
+#include "ultranet/net/ws_server.hpp"
+using namespace ynet::async::net;
+
+TEST(WsServerTest, ConstructWithPort) {
+    WsServer server(8080);
+    EXPECT_EQ(server.port(), 0);  // port not known until serve() binds
+}
+
+TEST(WsServerTest, HandlersRegistered) {
+    WsServer server(8080);
+    bool called = false;
+    server.on_text([&called](WsConn&, std::string) -> Task<void> {
+        called = true;
+        co_return;
+    });
+    server.on_binary([&called](WsConn&, std::vector<uint8_t>) -> Task<void> {
+        called = true;
+        co_return;
+    });
+    SUCCEED();  // Just checking registration doesn't crash
+}
+
+TEST(WsServerTest, AutoAssignPort) {
+    WsServer server(0);
+    // serve 需要在线程池上运行，简化为检查构造和端口
+    EXPECT_EQ(server.port(), 0);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
 // Main
 // ═══════════════════════════════════════════════════════════════════════
 

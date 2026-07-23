@@ -71,6 +71,23 @@ ref.send(order{42, "AAPL"});
 > 否则 → `static_assert(trivially copyable)` + memcpy 零拷贝。
 > 详见 [actor-guide.md](docs/actor-guide.md)。
 
+### WebSocket Server
+
+```cpp
+#include "ultranet/ultranet.h"
+using namespace ynet::async::net;
+
+int main() {
+    return Launcher().run([]() -> Task<void> {     // ShutdownCoordinator 自动隐藏
+        WsServer server(8080);
+        server.on_text([](WsConn& conn, std::string msg) -> Task<void> {
+            co_await conn.send_text("echo: " + msg);
+        });
+        co_await server.serve();
+    });
+}
+```
+
 ### Echo Server
 
 ```cpp

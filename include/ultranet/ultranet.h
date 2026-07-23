@@ -54,6 +54,7 @@
 #include "ultranet/net/connection_pool.hpp"
 #include "ultranet/net/http.hpp"
 #include "ultranet/net/websocket.hpp"
+#include "ultranet/net/ws_server.hpp"
 #include "ultranet/net/service_discovery.hpp"
 #include "ultranet/log/logger.hpp"
 

@@ -65,6 +65,27 @@ public:
         return 0;
     }
 
+    // 运行无需 ShutdownCoordinator 的函数（签名: () -> Task<void>）。
+    // ShutdownCoordinator 由框架内部管理，用户无需感知。
+    // 适用于使用高层封装（如 WsServer）的场景。
+    template <typename F>
+        requires std::is_invocable_r_v<Task<void>, F>
+              && (!std::is_invocable_r_v<Task<void>, F, lifecycle::ShutdownCoordinator&>)
+    int run(F&& fn) {
+        lifecycle::ShutdownCoordinator shutdown;
+        shutdown.install_signal_handlers();
+        try {
+            scheduling::WorkStealingThreadPool pool(m_threads, m_io_config);
+            ExecutionContext::Scope scope(&pool);
+            pool.submit(fn().release());
+            pool.wait_all();
+        } catch (const std::exception& e) {
+            ULTRA_LOG_CRITICAL("Fatal: {}", e.what());
+            return 1;
+        }
+        return 0;
+    }
+
     // 在每个工作线程上运行一个 fn 实例（线程绑定）。
     // fn(thread_id, shutdown) → Task<void>，每个线程调用一次。
     // 适用于 SO_REUSEPORT 多线程 accept 和每线程状态管理。
