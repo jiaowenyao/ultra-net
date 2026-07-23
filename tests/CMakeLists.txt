@@ -111,3 +111,10 @@ target_link_libraries(actor_gtest PRIVATE ultranet pthread gtest gtest_main)
 # Actor stress test
 add_executable(actor_stress_test actor_stress_test.cc)
 target_link_libraries(actor_stress_test PRIVATE ultranet pthread)
+
+add_executable(ws_bench_server ws_bench_server.cc)
+target_link_libraries(ws_bench_server PRIVATE ultranet pthread)
+
+add_executable(ws_bench_client ws_bench_client.cc)
+target_link_libraries(ws_bench_client PRIVATE ultranet pthread)
+

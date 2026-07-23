@@ -1,5 +1,5 @@
-// Ultra-Net Actor Framework v2 — Public API
-// Include this single header to use the actor framework.
+// Ultra-Net Actor 框架 — 公开 API。
+// 引入此单头文件即可使用完整的 actor 框架。
 #pragma once
 
 #include "ultranet/actor/core/type_hash.h"
