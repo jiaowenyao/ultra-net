@@ -20,7 +20,7 @@ Ultra-Net Actor 框架将任意 C++ 类转化为有状态的异步 Actor，所�
 
 **技术栈**: C++20 coroutine + io_uring + WorkStealingThreadPool
 
-**⚠️ 当前限制**: 消息类型必须是 trivially copyable（不含 `std::string`、`std::vector` 等堆分配成员）。框架使用 `memcpy` 传递消息负载，非平凡类型会触发 use-after-free。
+**消息传递**: 编译期自动选择路径——trivially copyable → memcpy 零拷贝（默认）；提供 `serialize()/deserialize()` → 自定义序列化（灵活）。`static_assert` 在编译期拦截不符合要求的类型。
 
 ---
 
@@ -47,7 +47,7 @@ Ultra-Net Actor 框架将任意 C++ 类转化为有状态的异步 Actor，所�
    - [URI 操作](#26-uri-操作)
    - [集群和 Gossip](#27-集群和-gossip)
    - [TCP Transport](#28-tcp-transport-使用)
-   - [Metrics Exporter](#29-metrics-exporter指标导出)
+   
    - [dist-bench 实际应用](#210-实际应用dist-bench-分布式训练基准测试)
 3. [架构演进 Phase 2–4](#第三部分架构演进-phase-24)
    - [Phase 2: Mailbox + 异步调度](#phase-2-mailbox--异步调度)
@@ -537,41 +537,37 @@ auto missing = system.find<my_actor>("ultra://*/my_actor/no-such");
 ### 2.4 发送消息
 
 ```cpp
-// Fire-and-forget 发送
+// Fire-and-forget 发送（异步投递到 mailbox）
 ref.send(ping_msg{1, "hello"});
 
-// 发送基本类型
-struct gradient_msg {
-    int layer_id;
-    std::vector<float> data;
-};
-ref.send(gradient_msg{0, {0.1f, 0.2f, 0.3f}});
+// 非阻塞发送（mailbox 满时返回 false）
+bool ok = ref.try_send(ping_msg{2, "world"});
 
-// 发送到无效 ref 是安全的（不会崩溃）
+// 跨 actor 发送（等价于 target.send(msg)）
+src_ref.send_to(dst_ref, ping_msg{3, "hi"});
+
+// 发送到无效 ref 是安全的
 actor_ref<handler_actor> empty_ref;
-empty_ref.send(int_msg{42});  // 内部检查 m_proxy 非空，静默忽略
+empty_ref.send(int_msg{42});  // 内部检查，静默忽略
 ```
 
-**消息发送的当前限制**：
+**发送语义**：
 
-1. **同步传递**：`send()` 当前直接调用 `deliver()`，在调用者线程上同步执行消息处理器
-2. **无返回值**：当前 `send()` 是 fire-and-forget 模式，`call()` / request-reply 模式尚未实现
-3. **消息大小**：消息按值传递（`sizeof(msg)`），大型数据应使用 `std::vector` 或指针
+1. **异步投递**：`send()` 将消息推入 mailbox 后立即返回，actor 在线程池上异步处理
+2. **背压处理**：mailbox 满时 `send()` 短暂阻塞（自适应退避），`try_send()` 立即返回 false
+3. **消息类型**：编译期自动检测——trivially copyable 走 memcpy 快路径，有 `serialize()` 走自定义序列化
 
 ---
 
 ### 2.5 注册消息处理器
 
-这是最重要的部分——告诉框架你的 Actor 能处理哪些消息：
-
 ```cpp
 class handler_actor : public actor<handler_actor> {
 public:
     int m_int_count = 0;
-    int m_str_count = 0;
+    char m_last_text[64] = {};
 
     handler_actor() {
-        // 注册 int 消息处理器
         register_handler<int_msg>([this](const int_msg& m) {
             m_int_count++;
             std::cout << "Got int: " << m.value << std::endl;
@@ -683,63 +679,6 @@ if (conn && conn->is_valid()) {
 
 ---
 
-### 2.9 Metrics Exporter（指标导出）
-
-```cpp
-#include "ultranet/actor/system/metrics_exporter.h"
-using namespace ynet::actor;
-
-auto exporter = std::make_shared<metrics_exporter>();
-
-// 注册指标提供者（返回 JSON 的函数）
-exporter->set_training_provider([&]() -> std::string {
-    training_snapshot_data snap;
-    snap.total_steps = 1000;
-    snap.throughput_mbps = 250.5;
-    return build_training_json(snap);
-});
-
-exporter->set_actors_provider([&]() -> std::string {
-    return build_actors_json({
-        {"ps", 0, 0.0, 1000, "running"},
-        {"worker-0", 3, 50.0, 250, "running"},
-    });
-});
-
-// 启动 HTTP server（在独立线程上运行，避免 io_uring 竞争）
-exporter->set_port(18080);
-exporter->start();
-
-// 查询实际绑定的端口
-int actual_port = exporter->port();
-
-// 优雅关闭
-exporter->stop();
-```
-
-**端点**：
-
-| 端点 | 内容 |
-|------|------|
-| `/health` | 健康检查 |
-| `/api/v1/nodes` | 节点拓扑和状态 |
-| `/api/v1/training` | 训练进度、吞吐量、延迟 |
-| `/api/v1/actors` | Actor 队列深度和消息速率 |
-| `/api/v1/network` | 连接带宽统计 |
-
-**Snapshot 模式**（当数据源生命周期短于 HTTP server 时使用）：
-
-```cpp
-// 1. 数据源可能被销毁前，保存快照
-exporter->store_training_snapshot(some_json);
-exporter->store_actors_snapshot(some_json);
-
-// 2. 切换到快照模式（lambda 不再引用已销毁的变量）
-exporter->use_snapshots();
-
-// 3. HTTP server 继续服务，不再访问原始数据源
-```
-
 ---
 
 ### 2.10 实际应用：dist-bench 分布式训练基准测试
@@ -828,46 +767,53 @@ exporter->use_snapshots();
 
 ### 3.1 当前状态：v2 Phase 4（集群+传输集成完成，66 项测试 100% 通过）
 
-**已实现**：
-
-| 功能 | 状态 | 文件 |
-|------|------|------|
-| `actor_system` 创建/销毁 | ✅ | `actor_system.h` |
-| `spawn<T>()` 侵入式/非侵入式 | ✅ | `actor_system.h` |
-| `actor_ref<T>` + `actor_uri` | ✅ | `actor_ref.h`, `actor_uri.h` |
-| `register_handler<Msg>()` | ✅ | `base_actor.h` |
-| `send(msg)` 异步发送（mailbox） | ✅ | `actor_ref.h` → `base_actor.h` |
-| `find()` 本地+远程查找 | ✅ | `actor_system.h` |
-| **Mailbox 异步调度** | ✅ | `mailbox.h` + `base_actor.h` |
-| **CAS 激活 + 自驱动** | ✅ | `base_actor.h::try_activate()` |
-| **Backpressure 检测** | ✅ | `mailbox.h::is_backpressure()` |
-| Gossip 集群协议 | ✅ | `cluster.h` |
-| TCP Transport | ✅ | `transport.h` |
-| Metrics Exporter | ✅ | `metrics_exporter.h` |
-| **Binary 序列化 (network byte order)** | ✅ | `dist/serialization.h` |
-| **远程代理 `remote_proxy`** | ✅ | `dist/remote_proxy.h` |
-| **Cluster 集成到 actor_system** | ✅ | 构造时自动启动 |
-| **Transport 集成到 actor_system** | ✅ | 同步 bind + 异步 serve |
-| **Gossip 周期自动化** | ✅ | `actor_system.h::gossip_loop()` |
-| **Inbound 消息路由** | ✅ | `handle_inbound_message()` |
-
-**尚未实现**（未来阶段）：
+### 3.1 功能清单
 
 | 功能 | 状态 |
 |------|------|
-| `call(msg)` 请求-回复 | ⏳ Phase 5+ |
-| `ULTRA_MESSAGE` 宏（自动序列化反射） | ⏳ Phase 5+ |
-| Supervision 监督树（parent/child 重启策略） | ⏳ Phase 5+ |
-| 非平凡类型消息支持（std::string/vector） | ⚠️ 当前仅支持 trivially copyable |
-| 多优先级 mailbox（high/medium/low） | ⏳ Phase 5+ |
+| `spawn/find/send/try_send/send_to` | ✅ |
+| Mailbox 异步调度 + CAS 激活 + 背压检测 | ✅ |
+| 侵入式自定义序列化（serialize/deserialize） | ✅ |
+| Gossip 集群发现 + TCP Transport | ✅ |
+| 远端 actor 代理（remote_proxy） | ✅ |
+| Actor 优雅关闭 + 异常安全 | ✅ |
+| `call(msg)` 请求-回复 | ⏳ |
+| Supervision 监督树 | ⏳ |
 
 ---
 
-### 3.2 已知陷阱
+### 3.2 注意事项
 
-**1. send() 是同步的**
+**1. 消息必须是 trivially copyable 或提供 serialize/deserialize**
 
-当前 `send()` 在调用者线程上直接执行消息处理器，而非通过 mailbox 异步调度。这意味着消息处理器中的阻塞操作会阻塞调用者。
+```cpp
+// ✅ 正确：trivially copyable
+struct ping { int id; char text[32]; };
+
+// ✅ 正确：自定义序列化
+struct order { std::string symbol;
+    std::vector<uint8_t> serialize() const { ... }
+    static order deserialize(const uint8_t*, size_t) { ... }
+};
+
+// ❌ 错误：含 std::string 且无序列化方法
+struct bad { std::string x; };  // static_assert 拦截
+```
+
+**2. 使用 `operator->` 访问 actor 成员**
+
+```cpp
+auto ref = sys.spawn<MyActor>("name");
+ref->received;  // ✅ 直接访问（替代 static_cast）
+```
+
+**3. 异步处理需要等待**
+
+`send()` 是异步的，消息在线程池上处理。测试中需要适当等待（`sleep_for` 或轮询 `ref->received`）。
+
+**4. 跨系统通信需要 gossip 发现**
+
+远端 actor 查找依赖 gossip 协议，首次发现需要等待 gossip 周期（默认 1 秒）。
 
 **2. find() 使用 typeid 名称**
 

@@ -18,7 +18,9 @@
 #include "ultranet/actor.hpp"
 using namespace ynet::actor;
 
-// 消息类型（⚠️ 必须是 trivially copyable）
+**默认快路径**（trivially copyable，P50=1μs）：
+
+```cpp
 struct ping { int id; char text[32] = {}; };
 
 class Pinger : public actor<Pinger> {
@@ -32,20 +34,42 @@ public:
 int main() {
     actor_system sys({.num_threads = 4});
     auto ref = sys.spawn<Pinger>("pinger-1");
-
-    ref.send(ping{42, "hello"});            // fire-and-forget
-    ref.try_send(ping{99, "world"});        // 非阻塞（背压时返回false）
-    ref.send_to(other_ref, ping{1, "hi"});  // 跨 actor 发送
-
-    int count = ref->received;              // operator-> 直接访问成员
+    ref.send(ping{42, "hello"});
+    int count = ref->received;
     sys.run();
 }
 ```
 
-> ⚠️ **消息类型限制**：框架使用 `memcpy` 传递消息，消息 struct **必须** 是 trivially copyable。
-> `std::string`、`std::vector`、`std::unique_ptr` 等类型会导致编译错误（`static_assert` 保护）。
-> 如需字符串字段，请使用 `char buf[N]` 固定数组。
-> 详见 [actor-guide.md](docs/actor-guide.md#消息类型限制)。
+**自定义序列化路径**（需要 std::string/vector 等复杂类型时）：
+
+```cpp
+struct order {
+    int id;
+    std::string symbol;
+
+    // 侵入式序列化：框架自动调用
+    std::vector<uint8_t> serialize() const {
+        std::vector<uint8_t> out;
+        out.resize(4 + symbol.size());
+        std::memcpy(out.data(), &id, 4);
+        std::memcpy(out.data() + 4, symbol.data(), symbol.size());
+        return out;
+    }
+    static order deserialize(const uint8_t* d, size_t n) {
+        order o;
+        std::memcpy(&o.id, d, 4);
+        o.symbol.assign(reinterpret_cast<const char*>(d + 4), n - 4);
+        return o;
+    }
+};
+// 使用方式完全一致，编译期自动选择序列化路径
+ref.send(order{42, "AAPL"});
+```
+
+> 📖 **消息传递机制**：框架编译期自动选择路径——
+> 有 `serialize()/deserialize()` → 自定义序列化；
+> 否则 → `static_assert(trivially copyable)` + memcpy 零拷贝。
+> 详见 [actor-guide.md](docs/actor-guide.md)。
 
 ### Echo Server
 
