@@ -19,6 +19,21 @@
 
 namespace ynet::actor {
 
+// ── 编译期序列化检测 ────────────────────────────────────────────────────
+// 检测消息类型是否提供了侵入式 serialize/deserialize 方法。
+// 若有 → 走自定义序列化路径；若无 → 走 memcpy 快路径（需 trivially copyable）。
+
+template <typename T>
+concept serializable_msg = requires(const T& t, const uint8_t* d, size_t n) {
+    t.serialize();
+    T::deserialize(d, n);
+};
+
+} // namespace ynet::actor
+
+// 重新打开以继续原有内容（避免影响后面的代码）
+namespace ynet::actor {
+
 namespace detail {
     // FNV-1a 哈希常量与计算
     inline constexpr uint64_t fnv1a(const char* s) {

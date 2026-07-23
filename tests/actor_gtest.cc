@@ -1561,6 +1561,77 @@ TEST(IoEdgeTest, TimeoutOnAccept) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
+// 自定义序列化消息测试
+// ═══════════════════════════════════════════════════════════════════════
+
+// 带自定义序列化的复杂消息类型
+struct complex_msg {
+    static constexpr const char* actor_type = "complex";
+    int id = 0;
+    std::string name;
+
+    // 用户自定义序列化格式（使用 msgpack、protobuf 或自行实现）
+    std::vector<uint8_t> serialize() const {
+        std::vector<uint8_t> out;
+        // 简单格式：[id:4][name_len:4][name:var]
+        out.resize(8 + name.size());
+        std::memcpy(out.data(), &id, 4);
+        uint32_t len = static_cast<uint32_t>(name.size());
+        std::memcpy(out.data() + 4, &len, 4);
+        std::memcpy(out.data() + 8, name.data(), len);
+        return out;
+    }
+
+    static complex_msg deserialize(const uint8_t* data, size_t len) {
+        complex_msg m;
+        if (len < 8) return m;
+        std::memcpy(&m.id, data, 4);
+        uint32_t name_len = 0;
+        std::memcpy(&name_len, data + 4, 4);
+        if (8 + name_len <= len) {
+            m.name.assign(reinterpret_cast<const char*>(data + 8), name_len);
+        }
+        return m;
+    }
+};
+
+class ComplexActor : public actor<ComplexActor> {
+public:
+    int received = 0;
+    complex_msg last_msg;
+    ComplexActor() {
+        register_handler<complex_msg>([this](const complex_msg& m) {
+            received++;
+            last_msg = m;
+        });
+    }
+};
+
+TEST(SerializeTest, CustomSerializeRoundTrip) {
+    actor_system sys({.num_threads = 2});
+    auto ref = sys.spawn<ComplexActor>("complex");
+    ASSERT_TRUE(ref.is_valid());
+
+    complex_msg msg{42, "hello-serialize"};
+    ref.send(msg);
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+    auto* a = static_cast<ComplexActor*>(ref.proxy()->local_actor());
+    ASSERT_EQ(a->received, 1);
+    EXPECT_EQ(a->last_msg.id, 42);
+    EXPECT_EQ(a->last_msg.name, "hello-serialize");
+}
+
+TEST(SerializeTest, TriviallyCopyableStillWorks) {
+    actor_system sys({.num_threads = 2});
+    auto ref = sys.spawn<CountingActor>("normal");
+    ref.send(int_msg{99});
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    auto* a = static_cast<CountingActor*>(ref.proxy()->local_actor());
+    EXPECT_EQ(a->received.load(), 1);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
 // Main
 // ═══════════════════════════════════════════════════════════════════════
 

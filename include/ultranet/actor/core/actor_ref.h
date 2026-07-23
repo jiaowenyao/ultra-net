@@ -79,10 +79,14 @@ public:
     // 消息类型必须为 trivially copyable（框架使用 memcpy 拷贝消息体）。
     template <typename Msg>
     void send(const Msg& msg) {
-        static_assert(std::is_trivially_copyable_v<Msg>,
-            "Actor messages must be trivially copyable");
-        if (m_proxy) {
-            uint64_t hash = actor_type_hash<Msg>();
+        static_assert(serializable_msg<Msg> || std::is_trivially_copyable_v<Msg>,
+            "Message must be trivially copyable or provide serialize()/deserialize()");
+        if (!m_proxy) { return; }
+        uint64_t hash = actor_type_hash<Msg>();
+        if constexpr (serializable_msg<Msg>) {
+            auto data = msg.serialize();
+            m_proxy->deliver(hash, data.data(), data.size());
+        } else {
             m_proxy->deliver(hash, &msg, sizeof(msg));
         }
     }
@@ -96,8 +100,8 @@ public:
     // 非阻塞发送：mailbox 满时返回 false，不阻塞调用方。
     template <typename Msg>
     bool try_send(const Msg& msg) {
-        static_assert(std::is_trivially_copyable_v<Msg>,
-            "Actor messages must be trivially copyable");
+        static_assert(serializable_msg<Msg> || std::is_trivially_copyable_v<Msg>,
+            "Message must be trivially copyable or provide serialize()/deserialize()");
         if (!m_proxy) {
             return false;
         }

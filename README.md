@@ -18,10 +18,9 @@
 #include "ultranet/actor.hpp"
 using namespace ynet::actor;
 
-// 定义消息
-struct ping { int id; };
+// 消息类型（⚠️ 必须是 trivially copyable）
+struct ping { int id; char text[32] = {}; };
 
-// 定义 Actor
 class Pinger : public actor<Pinger> {
 public:
     int received = 0;
@@ -33,11 +32,20 @@ public:
 int main() {
     actor_system sys({.num_threads = 4});
     auto ref = sys.spawn<Pinger>("pinger-1");
-    ref.send(ping{42});          // fire-and-forget
-    ref.try_send(ping{99});      // 非阻塞发送
+
+    ref.send(ping{42, "hello"});            // fire-and-forget
+    ref.try_send(ping{99, "world"});        // 非阻塞（背压时返回false）
+    ref.send_to(other_ref, ping{1, "hi"});  // 跨 actor 发送
+
+    int count = ref->received;              // operator-> 直接访问成员
     sys.run();
 }
 ```
+
+> ⚠️ **消息类型限制**：框架使用 `memcpy` 传递消息，消息 struct **必须** 是 trivially copyable。
+> `std::string`、`std::vector`、`std::unique_ptr` 等类型会导致编译错误（`static_assert` 保护）。
+> 如需字符串字段，请使用 `char buf[N]` 固定数组。
+> 详见 [actor-guide.md](docs/actor-guide.md#消息类型限制)。
 
 ### Echo Server
 

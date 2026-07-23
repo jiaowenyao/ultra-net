@@ -23,13 +23,18 @@ struct message_envelope {
     uint64_t             msg_type = 0;
     std::vector<uint8_t> data;
 
-    // 从消息实例构造信封（memcpy 拷贝消息体）
+    // 从消息实例构造信封。
+    // serializable 类型调用 serialize()，否则 memcpy。
     template <typename Msg>
     static message_envelope make(const Msg& msg) {
         message_envelope env;
         env.msg_type = actor_type_hash<Msg>();
-        env.data.resize(sizeof(Msg));
-        std::memcpy(env.data.data(), &msg, sizeof(Msg));
+        if constexpr (serializable_msg<Msg>) {
+            env.data = msg.serialize();
+        } else {
+            env.data.resize(sizeof(Msg));
+            std::memcpy(env.data.data(), &msg, sizeof(Msg));
+        }
         return env;
     }
 };
