@@ -27,7 +27,7 @@ struct int_msg {
 
 struct str_msg {
     static constexpr const char* actor_type = "str_msg";
-    std::string text;
+    char text[64] = {};
 };
 
 struct ping_msg {
@@ -38,7 +38,7 @@ struct ping_msg {
 struct pong_msg {
     static constexpr const char* actor_type = "pong";
     int id = 0;
-    std::string reply;
+    char reply[64] = {};
 };
 
 struct bench_msg {
@@ -54,11 +54,11 @@ struct bench_msg {
 class EchoActor : public actor<EchoActor> {
 public:
     int count = 0;
-    std::string last;
+    char last[32] = {};
     EchoActor() {
         register_handler<ping_msg>([this](const ping_msg& m) {
             ++count;
-            last = std::to_string(m.id);
+            std::snprintf(last, sizeof(last), "%d", m.id);
         });
     }
 };

@@ -76,20 +76,28 @@ public:
     // ── 消息发送 ─────────────────────────────────────────────────────────
 
     // Fire-and-forget 发送：消息异步投递到线程池上的 mailbox。
-    // 如果 mailbox 处于背压状态，调用可能短暂阻塞（有界自旋+让出CPU），
-    // 需要非阻塞版本请使用 try_send()。
+    // 消息类型必须为 trivially copyable（框架使用 memcpy 拷贝消息体）。
     template <typename Msg>
     void send(const Msg& msg) {
+        static_assert(std::is_trivially_copyable_v<Msg>,
+            "Actor messages must be trivially copyable");
         if (m_proxy) {
             uint64_t hash = actor_type_hash<Msg>();
             m_proxy->deliver(hash, &msg, sizeof(msg));
         }
     }
 
-    // 非阻塞发送：mailbox 满时返回 false（背压信号），不阻塞调用方。
-    // 仅对本地 actor 有效；远端代理始终缓冲消息，不受 mailbox 容量限制。
+    // 向任意类型的 actor 发送消息（跨 actor 通信）
+    template <typename U, typename Msg>
+    void send_to(actor_ref<U>& target, const Msg& msg) {
+        target.send(msg);
+    }
+
+    // 非阻塞发送：mailbox 满时返回 false，不阻塞调用方。
     template <typename Msg>
     bool try_send(const Msg& msg) {
+        static_assert(std::is_trivially_copyable_v<Msg>,
+            "Actor messages must be trivially copyable");
         if (!m_proxy) {
             return false;
         }
@@ -109,7 +117,15 @@ public:
         return false;
     }
 
-    // ── 内部访问器 ───────────────────────────────────────────────────────
+    // ── Actor 访问器 ─────────────────────────────────────────────────
+
+    // 获取底层 actor 裸指针（需 static_cast 到具体类型）
+    T* get() const {
+        if (m_proxy) { return static_cast<T*>(m_proxy->local_actor()); }
+        return nullptr;
+    }
+
+    T* operator->() const { return get(); }
 
     std::shared_ptr<actor_proxy> proxy() const { return m_proxy; }
 

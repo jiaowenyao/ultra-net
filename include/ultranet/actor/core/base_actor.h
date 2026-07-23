@@ -51,8 +51,13 @@ public:
 
     // 为指定消息类型注册处理器。
     // 用法：register_handler<my_msg>([](const my_msg& m) { ... });
+    // 要求：消息类型必须是 trivially copyable（框架使用 memcpy 拷贝消息体）。
     template <typename Msg>
     void register_handler(std::function<void(const Msg&)> handler) {
+        static_assert(std::is_trivially_copyable_v<Msg>,
+            "Actor message types must be trivially copyable. "
+            "Use fixed-size char arrays instead of std::string, "
+            "and plain types instead of std::vector or std::unique_ptr.");
         uint64_t hash = actor_type_hash<Msg>();
         // 用 lambda 包装用户处理器，提供类型安全的数据转换
         m_handlers[hash] = [handler = std::move(handler)](const void* data, size_t len) {
