@@ -118,3 +118,5 @@ target_link_libraries(ws_bench_server PRIVATE ultranet pthread)
 add_executable(ws_bench_client ws_bench_client.cc)
 target_link_libraries(ws_bench_client PRIVATE ultranet pthread)
 
+add_executable(ws_echo_bench ws_echo_bench.cc)
+target_link_libraries(ws_echo_bench ultranet pthread)
