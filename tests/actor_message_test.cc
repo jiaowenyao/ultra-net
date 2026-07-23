@@ -16,7 +16,7 @@ static int g_passed = 0, g_failed = 0;
 // ── Test message types ─────────────────────────────────────────────────
 
 struct int_msg { int value = 0; };
-struct str_msg { std::string text; };
+struct str_msg { char text[64] = {}; };
 struct float_msg { float data = 0.0f; };
 
 // ── Actor with handlers ────────────────────────────────────────────────

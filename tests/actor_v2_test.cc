@@ -17,8 +17,8 @@ static int g_passed = 0, g_failed = 0;
 
 // ── Test actors ────────────────────────────────────────────────────────
 
-struct ping_msg { int id; std::string text; };
-struct pong_msg { int id; std::string reply; };
+struct ping_msg { int id; char text[32] = {}; };
+struct pong_msg { int id; char reply[32] = {}; };
 
 class echo_actor : public actor<echo_actor> {
 public:
