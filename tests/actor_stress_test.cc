@@ -122,9 +122,11 @@ public:
 // ═══════════════════════════════════════════════════════════════════════
 
 void bench_throughput() {
-    print_bar("场景 1: 单 Actor 吞吐量极限 (10M 消息)");
+    constexpr uint64_t N = 500'000;
 
-    constexpr uint64_t N = 5'000'000;
+    std::cout << "\n" << std::string(72, '=') << "\n"
+              << "  场景 1: 单 Actor 吞吐量 (" << (N/1000) << "K 消息)\n"
+              << std::string(72, '=') << "\n";
     system_config cfg{.num_threads = 4, .max_per_activation = 512};
     actor_system sys(cfg);
     auto ref = sys.spawn<PerfActor>("tp");
