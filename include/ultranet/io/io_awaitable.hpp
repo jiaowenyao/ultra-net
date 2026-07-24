@@ -64,13 +64,6 @@ public:
 
         auto* ctx = IoUringEngine::current();
 
-        if (ctx->over_watermark()) {
-            m_callback.m_result = -ENOBUFS;
-            m_callback.m_completed = true;
-            m_callback.m_handle.resume();
-            return;
-        }
-
         m_sqe = ctx->get_sqe();
         if (m_sqe) [[likely]] {
             m_setup_fn(m_sqe);

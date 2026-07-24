@@ -8,7 +8,7 @@ using namespace ynet::async::net;
 int main(int argc, char* argv[]) {
     uint16_t port = (argc > 1) ? static_cast<uint16_t>(std::atoi(argv[1])) : 9001;
 
-    std::cout << "ws_bench_server listening on :" << port << "\n";
+    std::cout << "ws_bench_server port=" << port << "\n";
 
     return Launcher().threads(4).run(
         [port]() -> Task<void> {

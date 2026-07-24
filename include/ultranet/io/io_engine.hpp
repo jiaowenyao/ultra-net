@@ -10,7 +10,7 @@
 
 namespace ynet::async::io {
 
-inline constexpr size_t IOURING_DEFAULT_ENTRIES = 1024;
+inline constexpr size_t IOURING_DEFAULT_ENTRIES = 2048;  // 支持更高并发
 inline constexpr size_t BATCH_SUBMIT_THRESHOLD = 64;
 
 
@@ -24,7 +24,9 @@ struct IoUringEngineConfig {
     uint32_t sq_poll_thread_idle = 0;                 // SQ轮询线程空闲超时
     bool use_fixed_buffers = true;                    // 是否使用注册缓冲区
     size_t batch_threshold = BATCH_SUBMIT_THRESHOLD;  // 批量提交阈值
-    size_t max_pending_ops = 4096;                    // 最大待处理操作数（背压阈值）
+    // max_pending_ops 由 entries 自动推导（CQ ring = entries*2），
+    // 设为 ring 的 90% 留安全余量。高并发场景增大 entries 即可。
+    size_t max_pending_ops = 0;  // 0 = 自动: entries * 2 * 90%
 };
 
 
@@ -198,6 +200,10 @@ public:
 private:
     explicit IoUringEngine(const Config& config)
         : m_config(config) {
+        // max_pending_ops=0 时自动推导：CQ ring 容量的 90%
+        if (m_config.max_pending_ops == 0) {
+            m_config.max_pending_ops = m_config.entries * 2 * 9 / 10;
+        }
         m_ring.ring_fd = -1;
         io_uring_params params{};
         params.flags = config.flags;
