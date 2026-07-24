@@ -24,7 +24,7 @@ struct IoUringEngineConfig {
     uint32_t sq_poll_thread_idle = 0;                 // SQ轮询线程空闲超时
     bool use_fixed_buffers = true;                    // 是否使用注册缓冲区
     size_t batch_threshold = BATCH_SUBMIT_THRESHOLD;  // 批量提交阈值
-    size_t max_pending_ops = 256;                     // 最大待处理操作数（背压阈值）
+    size_t max_pending_ops = 4096;                    // 最大待处理操作数（背压阈值）
 };
 
 
