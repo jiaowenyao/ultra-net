@@ -130,3 +130,7 @@ target_link_libraries(ws_concurrent ultranet pthread)
 add_executable(ws_conc_bench ws_conc_bench.cc)
 target_link_libraries(ws_conc_bench ultranet pthread)
 
+
+add_executable(ws_bench_stress ws_bench_stress.cc)
+target_link_libraries(ws_bench_stress ultranet pthread)
+
