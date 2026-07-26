@@ -233,9 +233,9 @@ class WebSocket : ynet::utils::Noncopyable {
     // WS_READ_BUF covers most frames in a single read (8 KiB).
     // WS_WRITE_BUF covers frames up to ~16 KiB payload without heap alloc.
     // Beyond these, a heap fallback is used transparently.
-    static constexpr size_t WS_READ_BUF = 8192;
+    static constexpr size_t WS_READ_BUF = 16384;   // 16KB 栈缓冲（覆盖多数帧）
     static constexpr size_t WS_WRITE_BUF = 16384;
-    static constexpr size_t WS_READ_CHUNK = 4096;
+    static constexpr size_t WS_READ_CHUNK = 16384;  // 16KB 扩展粒度
 
 public:
     explicit WebSocket(TcpSocket socket) noexcept : m_socket(std::move(socket)), m_masked(true) {}
