@@ -387,25 +387,48 @@ public:
     }
 
     Task<void> write_frame(const WebSocketFrame& frame) {
-        uint8_t stack_buf[WS_WRITE_BUF];
-        size_t n = frame.encode_into(stack_buf, WS_WRITE_BUF, m_masked);
-        if (n > 0) {
-            auto w = co_await m_socket.write(stack_buf, n);
-            if (!w) throw std::system_error(w.error(), "websocket write failed");
-            co_return;
+        // 统一 writev 路径：帧头栈编码(≤14B) + payload 原位引用，零拷贝。
+        // 消除大帧的 heap 分配和 payload 全拷贝瓶颈。
+        size_t payload_len = frame.payload.size();
+        size_t total = WebSocketFrame::encoded_size(payload_len, m_masked);
+        size_t hdr_len = total - payload_len;
+
+        // 栈编码帧头（最多 14 字节）
+        uint8_t hdr[14];
+        uint8_t* p = hdr;
+        *p++ = static_cast<uint8_t>((frame.fin ? 0x80 : 0x00) |
+                                     (static_cast<uint8_t>(frame.opcode) & 0x0F));
+        if (payload_len < 126) {
+            *p++ = static_cast<uint8_t>(payload_len | (m_masked ? 0x80 : 0x00));
+        } else if (payload_len <= 65535) {
+            *p++ = static_cast<uint8_t>(126 | (m_masked ? 0x80 : 0x00));
+            *p++ = static_cast<uint8_t>(payload_len >> 8);
+            *p++ = static_cast<uint8_t>(payload_len);
+        } else {
+            *p++ = static_cast<uint8_t>(127 | (m_masked ? 0x80 : 0x00));
+            for (int i = 7; i >= 0; --i) {
+                *p++ = static_cast<uint8_t>(payload_len >> (i * 8));
+            }
+        }
+        if (m_masked) {
+            uint32_t mk = frame.masking_key;
+            *p++ = static_cast<uint8_t>(mk >> 24);
+            *p++ = static_cast<uint8_t>(mk >> 16);
+            *p++ = static_cast<uint8_t>(mk >> 8);
+            *p++ = static_cast<uint8_t>(mk);
         }
 
-        // Large frame (>WS_WRITE_BUF): heap-allocated encode + writev
-        auto encoded = frame.encode(m_masked);
-        size_t hdr_end = WebSocketFrame::encoded_size(frame.payload.size(), m_masked) - frame.payload.size();
         iovec iov[2];
-        iov[0].iov_base = const_cast<uint8_t*>(encoded.data());
-        iov[0].iov_len = hdr_end;
-        iov[1].iov_base = encoded.data() + hdr_end;
-        iov[1].iov_len = encoded.size() - hdr_end;
+        iov[0].iov_base = hdr;
+        iov[0].iov_len = hdr_len;
+        iov[1].iov_base = const_cast<char*>(
+            reinterpret_cast<const char*>(frame.payload.data()));
+        iov[1].iov_len = payload_len;
 
         auto w = co_await io::Writev(m_socket.fd(), iov, 2);
-        if (!w) throw std::system_error(w.error(), "websocket write failed");
+        if (!w) {
+            throw std::system_error(w.error(), "websocket write failed");
+        }
     }
 
     Task<void> send_text(std::string data) {
