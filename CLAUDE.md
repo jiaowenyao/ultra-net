@@ -1,5 +1,24 @@
 # CLAUDE.md — ultra-net 项目约定与开发规范
 
+## Skills 触发规则
+
+以下场景**必须**先调用对应 skill，再开始工作：
+
+| 场景 | 必须调用的 Skill | 触发条件 |
+|------|-----------------|---------|
+| 修复 Bug / 排查崩溃 | `systematic-debugging` | 出现 crash、double-free、use-after-free、超时 |
+| 声称"修好了/完成了" | `verification-before-completion` | 提交前、声称通过前——必须跑测试并展示证据 |
+| 多步骤实现（>3 步） | `writing-plans` | 涉及 ≥3 个文件 或 ≥2 个模块的改动 |
+| 按计划逐步实现 | `executing-plans` | 已有书面计划，分检查点执行 |
+| 新增功能/特性 | `test-driven-development` | 任何新增 API、类、模块、优化 |
+| 设计讨论/创意工作 | `brainstorming` | 架构决策、API 设计、优化方向 |
+| 代码审查（提交前自查） | `requesting-code-review` | 完成一个阶段后自我审查 |
+| 启动新对话 | `using-superpowers` | 新会话开始，建立 skills 上下文 |
+| 多独立任务并行 | `dispatching-parallel-agents` | ≥2 个互不依赖的任务同时推进 |
+| 架构讨论/术语对齐 | `grill-with-docs` | 设计模式、术语、抽象层次讨论 |
+
+**原则**：宁可多调用一次 skill，不要跳过流程。skill 是流程保障，不是负担。
+
 ## 代码风格
 
 - **注释必须使用中文**（专业术语如 CAS、mailbox、gossip、CRTP、io_uring 等保留英文）
@@ -74,6 +93,24 @@
 - 禁止过度抽象（新增类/层需明确收益）
 - 禁止未经 ASAN 验证的协程生命周期修改
 - 禁止在协程中使用 `ASSERT_*`（GTest 宏使用 `return` 非法），改用 `EXPECT_*` + `co_return`
+
+## 性能优化工作流
+
+每次性能优化遵循三层基准对比法：
+
+```
+1. 理论极限 (raw io_uring, 无协程)  →  设定天花板
+2. 协程路径 (当前 ultra-net)        →  量化协程开销
+3. 对比差异                         →  定位瓶颈层
+```
+
+优化优先级：
+- **P0**：消除 io_uring syscall 延迟（`submit_now()` 立即刷新，消除 `wait_for_events` 等待）
+- **P1**：协程帧池化（线程局部复用，减少 malloc/free。注意：必须全量重编避免 ABI 不一致）
+- **P2**：零拷贝路径（栈编码 + writev，已部分实现）
+- **P3**：多核扩展（SO_REUSEPORT + 独立 io_uring ring）
+
+每次优化后必跑 `tests/CHECKLIST.md` 全部项目。
 
 ## 关键文件
 
