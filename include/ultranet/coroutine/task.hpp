@@ -29,17 +29,34 @@ struct TaskPromiseBase {
 
     TaskPromiseBase() = default;
 
-    // 强制堆分配，阻止编译器 HALO 优化将协程帧放在栈上。
-    // 协程帧必须在堆上，才能在调度器中安全地在线程间传递。
+    // 强制堆分配+单槽线程局部帧缓存。同大小复用，零malloc开销。
+    // 线程局部存储保证无锁安全，单槽避免ABI兼容性问题。
     static void* operator new(std::size_t size) {
+        if (t_cached_ptr && t_cached_size == size) {
+            void* p = t_cached_ptr;
+            t_cached_ptr = nullptr;
+            return p;
+        }
+        if (t_cached_ptr) {
+            ::operator delete(t_cached_ptr);
+            t_cached_ptr = nullptr;
+        }
         return ::operator new(size);
-    }
-    static void operator delete(void* ptr, std::size_t /*size*/) {
-        ::operator delete(ptr);
     }
     static void operator delete(void* ptr) {
         ::operator delete(ptr);
     }
+    static void operator delete(void* ptr, std::size_t size) {
+        if (t_cached_ptr) {
+            ::operator delete(t_cached_ptr);
+        }
+        t_cached_ptr = ptr;
+        t_cached_size = size;
+    }
+
+    // 线程局部帧缓存（仅 operator new/delete 使用）
+    static thread_local void* t_cached_ptr;
+    static thread_local std::size_t t_cached_size;
 
     // 协程完成时由 final_suspend 调用，通知线程池任务计数减一
     void notify_complete() noexcept {
@@ -315,5 +332,9 @@ inline Task<T> TaskPromise<T>::get_return_object() noexcept {
 inline Task<void> TaskPromise<void>::get_return_object() noexcept {
     return Task<void>(std::coroutine_handle<TaskPromise>::from_promise(*this));
 }
+
+// ── 线程局部帧缓存 ──────────────────────────────────────────────────────────
+inline thread_local void* TaskPromiseBase::t_cached_ptr = nullptr;
+inline thread_local std::size_t TaskPromiseBase::t_cached_size = 0;
 
 } // namespace ynet::async
