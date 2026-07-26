@@ -444,6 +444,57 @@ public:
         co_return co_await write_frame(WebSocketFrame::pong(data));
     }
 
+    // 内联 echo：读帧→写回，payload 不离开 read_frame 协程上下文。
+    // 消除 decode 中的 payload.assign() 拷贝和跨协程传递开销。
+    // 返回 false 表示连接关闭。
+    Task<bool> echo_inplace() {
+        uint8_t stack_buf[WS_READ_BUF];
+        std::vector<uint8_t> heap_buf;
+        uint8_t* buf = stack_buf;
+        size_t cap = WS_READ_BUF;
+        size_t total = 0;
+
+        while (true) {
+            auto r = co_await m_socket.read(buf + total, cap - total);
+            if (!r) co_return false;
+            if (*r == 0) co_return false;
+            total += *r;
+
+            size_t consumed = 0;
+            WebSocketFrame frame;
+            if (WebSocketFrame::decode(buf, total, consumed, frame)) {
+                if (frame.opcode == OpCode::Ping) {
+                    co_await write_frame(WebSocketFrame::pong(frame.payload));
+                } else if (frame.opcode == OpCode::Close) {
+                    co_await write_frame(WebSocketFrame::close());
+                    m_closed = true;
+                    co_return false;
+                } else {
+                    co_await write_frame(frame);
+                    co_return true;
+                }
+                // 清理已消费数据
+                if (consumed < total) {
+                    std::memmove(buf, buf + consumed, total - consumed);
+                    total -= consumed;
+                } else {
+                    total = 0;
+                }
+            }
+
+            if (buf == stack_buf && total >= cap) {
+                heap_buf.assign(stack_buf, stack_buf + total);
+                buf = heap_buf.data();
+                cap = heap_buf.capacity();
+            }
+            if (total >= cap) {
+                heap_buf.resize(cap + WS_READ_CHUNK);
+                buf = heap_buf.data();
+                cap = heap_buf.size();
+            }
+        }
+    }
+
     Task<void> close(uint16_t code = 1000, const std::string& reason = "") {
         if (m_closed) co_return;
         co_await write_frame(WebSocketFrame::close(code, reason));

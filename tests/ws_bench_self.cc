@@ -19,19 +19,48 @@ static uint64_t now_us() {
     return duration_cast<microseconds>(steady_clock::now().time_since_epoch()).count();
 }
 
-// 服务端线程
+// 服务端线程——使用 echo_inplace 实现零拷贝 echo
 static void run_server(uint16_t port, std::atomic<bool>& ready) {
     Launcher().threads(2).run([port, &ready]() -> Task<void> {
-        WsServer server(port);
-        server.on_text([](WsConn& conn, std::string msg) -> Task<void> {
-            co_await conn.send_text(msg);
-        });
-        server.on_binary([](WsConn& conn, std::vector<uint8_t> d) -> Task<void> {
-            co_await conn.send_binary(d.data(), d.size());
-        });
-        std::cout << "[server] listening on :" << server.port() << std::endl;
+        auto sock = co_await Socket(AF_INET, SOCK_STREAM, 0);
+        int fd = *sock;
+        int opt = 1;
+        setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+        sockaddr_in addr{};
+        addr.sin_family = AF_INET; addr.sin_port = htons(port);
+        addr.sin_addr.s_addr = INADDR_ANY;
+        co_await Bind(fd, (sockaddr*)&addr, sizeof(addr));
+        co_await Listen(fd, 64);
+
+        sockaddr_in bound{}; socklen_t blen = sizeof(bound);
+        getsockname(fd, (sockaddr*)&bound, &blen);
+        std::cout << "[echo_inplace] listening on :" << ntohs(bound.sin_port) << std::endl;
         ready.store(true);
-        co_await server.serve();
+
+        ShutdownCoordinator sd;
+        while (!sd.is_shutdown()) {
+            Accept a(fd); a.with_timeout(std::chrono::milliseconds(200));
+            auto client = co_await a;
+            if (!client) continue;
+            int cfd = *client;
+            auto* sched = ExecutionContext::current();
+            if (sched) {
+                sched->submit([](int client_fd) -> Task<void> {
+                    TcpSocket cs(client_fd);
+                    websocket::WebSocket ws(std::move(cs));
+                    char buf[4096];
+                    Read r(ws.socket().fd(), buf, sizeof(buf));
+                    r.with_timeout(std::chrono::seconds(5));
+                    auto rr = co_await r;
+                    if (!rr || *rr == 0) { co_return; }
+                    http::HttpRequest req;
+                    if (req.parse(buf, *rr) == 0) { co_return; }
+                    if (co_await ws.accept(req)) { co_return; }
+                    while (co_await ws.echo_inplace()) {}
+                }(cfd).release());
+            }
+        }
+        co_await Close(fd);
     });
 }
 
