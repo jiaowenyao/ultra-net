@@ -136,3 +136,7 @@ target_link_libraries(ws_bench_stress ultranet pthread)
 
 add_executable(ws_bench_self ws_bench_self.cc)
 target_link_libraries(ws_bench_self ultranet pthread)
+
+add_executable(ws_gbench ws_gbench.cc)
+target_link_libraries(ws_gbench ultranet pthread benchmark)
+
