@@ -85,11 +85,9 @@ public:
             ctx->increment_pending();
             ctx->increment_pending_ops();
 
-            if (ctx->should_submit()) {
-                ctx->submit();
-            } else if (m_callback.m_has_deadline) {
-                ctx->submit_now();
-            }
+            // 立即刷新 SQE 到内核，消除 reactor wait_for_events 的延迟。
+            // 批量提交仍然有效：submit_now() 一次性发送所有累积的 SQE。
+            ctx->submit_now();
         } else {
             m_callback.m_result = -ENOBUFS;
             m_callback.m_completed = true;
