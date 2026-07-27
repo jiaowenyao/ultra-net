@@ -144,3 +144,7 @@ target_link_libraries(ws_gbench ultranet pthread benchmark)
 add_executable(ws_gbench_full ws_gbench_full.cc)
 target_link_libraries(ws_gbench_full ultranet pthread benchmark)
 
+
+add_executable(echo_multishot echo_multishot.cc)
+target_link_libraries(echo_multishot ultranet pthread)
+
