@@ -154,6 +154,15 @@ target_link_libraries(ws_ring_echo_self ultranet pthread)
 add_executable(ws_ring_concurrent ws_ring_concurrent.cc)
 target_link_libraries(ws_ring_concurrent ultranet pthread)
 
+add_executable(ws_client_bench ws_client_bench.cc)
+target_link_libraries(ws_client_bench ultranet pthread)
+
+add_executable(echo_server_standalone echo_server_standalone.cc)
+target_link_libraries(echo_server_standalone ultranet pthread)
+
+add_executable(echo_server_raw echo_server_raw.cc)
+target_link_libraries(echo_server_raw ultranet pthread)
+
 add_executable(mshot_recv_minimal mshot_recv_minimal.cc)
 target_link_libraries(mshot_recv_minimal ultranet pthread)
 
