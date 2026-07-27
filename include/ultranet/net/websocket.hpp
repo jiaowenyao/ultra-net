@@ -511,6 +511,52 @@ public:
         }
     }
 
+    // ── 零拷贝写帧 ──────────────────────────────────────────────────
+    //
+    // 帧头栈编码(≤14B) + payload 原位 writev 引用，不经过 WebSocketFrame 对象。
+    // payload 指向的内存必须在 writev 完成前保持有效。
+    // 服务端 m_masked=false，帧头仅 2-10 字节，无 mask key。
+
+    Task<void> write_frame_raw(OpCode opcode, bool fin,
+                               const uint8_t* payload, size_t payload_len) {
+        uint8_t hdr[14];
+        uint8_t* p = hdr;
+        *p++ = static_cast<uint8_t>((fin ? 0x80 : 0x00) |
+                                     (static_cast<uint8_t>(opcode) & 0x0F));
+        if (payload_len < 126) {
+            *p++ = static_cast<uint8_t>(payload_len | (m_masked ? 0x80 : 0x00));
+        } else if (payload_len <= 65535) {
+            *p++ = static_cast<uint8_t>(126 | (m_masked ? 0x80 : 0x00));
+            *p++ = static_cast<uint8_t>(payload_len >> 8);
+            *p++ = static_cast<uint8_t>(payload_len);
+        } else {
+            *p++ = static_cast<uint8_t>(127 | (m_masked ? 0x80 : 0x00));
+            for (int i = 7; i >= 0; --i) {
+                *p++ = static_cast<uint8_t>(payload_len >> (i * 8));
+            }
+        }
+        if (m_masked) {
+            uint32_t mk = 0;
+            // 服务端通常 m_masked=false，此分支不执行
+            *p++ = static_cast<uint8_t>(mk >> 24);
+            *p++ = static_cast<uint8_t>(mk >> 16);
+            *p++ = static_cast<uint8_t>(mk >> 8);
+            *p++ = static_cast<uint8_t>(mk);
+        }
+        size_t hdr_len = static_cast<size_t>(p - hdr);
+
+        iovec iov[2];
+        iov[0].iov_base = hdr;
+        iov[0].iov_len = hdr_len;
+        iov[1].iov_base = const_cast<uint8_t*>(payload);
+        iov[1].iov_len = payload_len;
+
+        auto w = co_await io::Writev(m_socket.fd(), iov, 2);
+        if (!w) {
+            throw std::system_error(w.error(), "websocket write failed");
+        }
+    }
+
     Task<void> send_text(std::string data) {
         co_return co_await write_frame(WebSocketFrame::text(std::move(data)));
     }
@@ -581,8 +627,8 @@ public:
     // 返回 false 表示连接关闭。
 
     Task<bool> echo_inplace_ring(BufferRingAssembler& assembler) {
-        // 就地解码 lambda
-        auto try_decode = [&]() -> std::optional<WebSocketFrame> {
+        // 慢路径：走 assembler 重组 + WebSocketFrame::decode 流程
+        auto slow_try_decode = [&]() -> std::optional<WebSocketFrame> {
             auto& buf = assembler.reasm_buffer();
             if (buf.empty()) {
                 return std::nullopt;
@@ -598,9 +644,9 @@ public:
         };
 
         while (true) {
-            // 重组缓冲区有残留时先尝试解码
+            // 重组缓冲区有残留时走慢路径解码
             if (assembler.has_remaining()) {
-                auto frame = try_decode();
+                auto frame = slow_try_decode();
                 if (frame) {
                     if (frame->opcode == OpCode::Ping) {
                         co_await write_frame(
@@ -617,24 +663,132 @@ public:
                 }
             }
 
-            // 等待下一个数据块
+            // 等待下一个 ring buffer 数据块
             auto chunk = co_await assembler.next_chunk();
             if (chunk.is_eof() || chunk.is_error()) {
                 co_return false;
             }
 
-            // 追加到重组缓冲区
-            assembler.append_chunk(chunk);
+            // ═══ 快速路径：尝试直接从 ring buffer 解析单 buffer 帧 ═══
+            auto* bg = assembler.buffer_group();
+            bool fast_ok = false;
+            if (bg && chunk.res >= 2)
+            {
+                auto* raw = static_cast<const uint8_t*>(
+                    bg->get_buffer(chunk.buffer_id()));
+                size_t len = static_cast<size_t>(chunk.res);
 
-            // 尝试解码
-            auto frame = try_decode();
-            if (frame) {
-                if (frame->opcode == OpCode::Ping) {
+                // 解析帧头
+                bool fin = (raw[0] & 0x80) != 0;
+                auto opcode = static_cast<OpCode>(raw[0] & 0x0F);
+                bool masked = (raw[1] & 0x80) != 0;
+                uint64_t plen = raw[1] & 0x7F;
+                size_t pos = 2;
+
+                // 扩展长度字段
+                if (plen == 126)
+                {
+                    if (len < 4) { goto append_slow; }
+                    plen = (static_cast<uint64_t>(raw[2]) << 8) | raw[3];
+                    pos = 4;
+                }
+                else if (plen == 127)
+                {
+                    if (len < 10) { goto append_slow; }
+                    plen = 0;
+                    for (int i = 0; i < 8; ++i)
+                    {
+                        plen = (plen << 8) | raw[2 + i];
+                    }
+                    pos = 10;
+                }
+
+                // 掩码键
+                uint32_t mask_key = 0;
+                if (masked)
+                {
+                    if (len < pos + 4) { goto append_slow; }
+                    mask_key = (static_cast<uint32_t>(raw[pos]) << 24)
+                             | (static_cast<uint32_t>(raw[pos + 1]) << 16)
+                             | (static_cast<uint32_t>(raw[pos + 2]) << 8)
+                             | raw[pos + 3];
+                    pos += 4;
+                }
+
+                // 检查 payload 是否完整在此 buffer 内
+                if (pos + plen > len)
+                {
+                    goto append_slow;
+                }
+
+                // ── 快速路径：零拷贝处理 ──────────────────────────
+                const uint8_t* payload_ptr = raw + pos;
+
+                if (opcode == OpCode::Ping)
+                {
+                    // Ping→Pong：payload 小，拷贝可接受
+                    std::string ping_data(
+                        reinterpret_cast<const char*>(payload_ptr), plen);
+                    if (masked)
+                    {
+                        for (size_t i = 0; i < plen; ++i)
+                        {
+                            ping_data[i] ^= static_cast<char>(
+                                (mask_key >> (8 * (3 - (i % 4)))) & 0xFF);
+                        }
+                    }
+                    co_await write_frame(WebSocketFrame::pong(ping_data));
+                    fast_ok = true;
+                }
+                else if (opcode == OpCode::Close)
+                {
+                    co_await write_frame(WebSocketFrame::close());
+                    m_closed = true;
+                    bg->return_buffer(chunk.buffer_id());
+                    bg->advance_ring(1);
+                    co_return false;
+                }
+                else if (opcode == OpCode::Text || opcode == OpCode::Binary ||
+                         opcode == OpCode::Continuation)
+                {
+                    // 原地解掩码——ring buffer 在 return 前不会被内核触碰
+                    if (masked && plen > 0)
+                    {
+                        auto* mp = const_cast<uint8_t*>(payload_ptr);
+                        for (size_t i = 0; i < plen; ++i)
+                        {
+                            mp[i] ^= static_cast<uint8_t>(
+                                (mask_key >> (8 * (3 - (i % 4)))) & 0xFF);
+                        }
+                    }
+
+                    // writev 直接引用 ring buffer 中的 payload（零拷贝）
+                    co_await write_frame_raw(opcode, fin, payload_ptr, plen);
+                    fast_ok = true;
+                }
+
+                if (fast_ok)
+                {
+                    bg->return_buffer(chunk.buffer_id());
+                    bg->advance_ring(1);
+                    co_return true;
+                }
+            }
+
+        append_slow:
+            // ── 慢路径：帧跨 buffer，走 assembler 重组流程 ────────
+            assembler.append_chunk(chunk);
+            auto frame = slow_try_decode();
+            if (frame)
+            {
+                if (frame->opcode == OpCode::Ping)
+                {
                     co_await write_frame(
                         WebSocketFrame::pong(frame->payload));
                     co_return true;
                 }
-                if (frame->opcode == OpCode::Close) {
+                if (frame->opcode == OpCode::Close)
+                {
                     co_await write_frame(WebSocketFrame::close());
                     m_closed = true;
                     co_return false;
@@ -642,8 +796,7 @@ public:
                 co_await write_frame(*frame);
                 co_return true;
             }
-
-            // 帧不完整，继续等待下一个数据块
+            // 帧不完整，继续等待更多数据块
         }
     }
 

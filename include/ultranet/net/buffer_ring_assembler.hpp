@@ -169,6 +169,12 @@ public:
         return m_started;
     }
 
+    // 获取底层 BufferGroup——快速路径需要直接访问 ring buffer 内存
+    io::BufferGroup* buffer_group() const
+    {
+        return m_bg;
+    }
+
     // 重组缓冲区是否有残留数据（前一轮解码后的下一帧片段）
     bool has_remaining() const
     {
