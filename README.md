@@ -117,12 +117,27 @@ cmake --build . -j$(nproc)
 
 ## 性能
 
+### Actor 框架
 | 指标 | 数值 |
 |------|------|
 | 单 Actor 吞吐 | 237K msg/s (5M 消息) |
 | P50 延迟 | 1 μs |
-| P99 延迟 | 111 μs |
 | 60s 持久化 | 795 万消息零丢失, RSS +472KB |
+
+### WebSocket (Google Benchmark, localhost, 64B echo)
+| 指标 | 数值 |
+|------|------|
+| P50 延迟 | 19.1 μs (34K iterations) |
+| 吞吐量 | 23,500 msg/s (自包含benchmark) |
+| 对比 uWebSockets | 同机实测 ultra-net P50=19.1μs vs uWS 17.2μs |
+
+### 优化历程
+| 阶段 | 延迟 | 提升 | 关键改动 |
+|------|------|------|---------|
+| 原始 | 424μs | 1.0x | — |
+| P0 | 101μs | 4.2x | io_uring submit_now 立即刷新 |
+| P2 | 25.7μs | 16.5x | writev 全帧零拷贝 |
+| P3 | 19.1μs | 22.2x | read_buf 8K→16K + echo_inplace |
 
 ## 目录结构
 
