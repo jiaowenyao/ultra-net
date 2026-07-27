@@ -152,3 +152,7 @@ add_executable(recv_multishot_test recv_multishot_test.cc)
 target_include_directories(recv_multishot_test PRIVATE ${GTest_INCLUDE_DIR})
 target_link_libraries(recv_multishot_test PRIVATE ultranet pthread gtest gtest_main)
 
+add_executable(buffer_ring_assembler_test buffer_ring_assembler_test.cc)
+target_include_directories(buffer_ring_assembler_test PRIVATE ${GTest_INCLUDE_DIR})
+target_link_libraries(buffer_ring_assembler_test PRIVATE ultranet pthread gtest gtest_main)
+
