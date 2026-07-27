@@ -58,6 +58,16 @@ inline BufferGroup::BufferGroup(unsigned gid, size_t entries, size_t buf_size,
     if (ret < 0) throw std::system_error(-ret, std::system_category(), "register buffer ring");
     m_registered = true;
     m_br = reinterpret_cast<struct io_uring_buf_ring*>(m_bufs.get());
+
+    // 初始化 buffer ring：预填充所有 buffer，内核在 multishot recv 时从中选择。
+    unsigned mask = static_cast<unsigned>(m_entries - 1);
+    for (size_t i = 0; i < entries; ++i) {
+        io_uring_buf_ring_add(m_br, get_buffer(static_cast<unsigned>(i)),
+                              static_cast<unsigned>(buf_size),
+                              static_cast<unsigned short>(i), mask,
+                              static_cast<int>(i));
+    }
+    io_uring_buf_ring_advance(m_br, static_cast<int>(entries));
 }
 inline BufferGroup::~BufferGroup() { if (m_registered) io_uring_unregister_buf_ring(m_ring, m_gid); }
 inline void* BufferGroup::get_buffer(unsigned bid) const noexcept { return m_buffers.get()+(bid%m_entries)*m_buf_size; }

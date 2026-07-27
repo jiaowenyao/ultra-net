@@ -148,6 +148,15 @@ target_link_libraries(ws_gbench_full ultranet pthread benchmark)
 add_executable(echo_multishot echo_multishot.cc)
 target_link_libraries(echo_multishot ultranet pthread)
 
+add_executable(ws_ring_echo_self ws_ring_echo_self.cc)
+target_link_libraries(ws_ring_echo_self ultranet pthread)
+
+add_executable(mshot_recv_minimal mshot_recv_minimal.cc)
+target_link_libraries(mshot_recv_minimal ultranet pthread)
+
+add_executable(mshot_handshake_test mshot_handshake_test.cc)
+target_link_libraries(mshot_handshake_test ultranet pthread)
+
 add_executable(recv_multishot_test recv_multishot_test.cc)
 target_include_directories(recv_multishot_test PRIVATE ${GTest_INCLUDE_DIR})
 target_link_libraries(recv_multishot_test PRIVATE ultranet pthread gtest gtest_main)
