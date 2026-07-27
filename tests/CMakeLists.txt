@@ -157,6 +157,9 @@ target_link_libraries(ws_ring_concurrent ultranet pthread)
 add_executable(ws_client_bench ws_client_bench.cc)
 target_link_libraries(ws_client_bench ultranet pthread)
 
+add_executable(ws_stress ws_stress.cc)
+target_link_libraries(ws_stress ultranet pthread)
+
 add_executable(echo_server_standalone echo_server_standalone.cc)
 target_link_libraries(echo_server_standalone ultranet pthread)
 
