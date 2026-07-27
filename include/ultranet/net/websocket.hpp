@@ -574,6 +574,79 @@ public:
         }
     }
 
+    // ── ring-based 内联 echo ──────────────────────────────────────────
+    //
+    // 使用 multishot recv + buffer ring 实现零拷贝 echo。
+    // 流程：接收 buffer ring 数据块 → 重组 → 解码帧 → 直接写回。
+    // 返回 false 表示连接关闭。
+
+    Task<bool> echo_inplace_ring(BufferRingAssembler& assembler) {
+        // 就地解码 lambda
+        auto try_decode = [&]() -> std::optional<WebSocketFrame> {
+            auto& buf = assembler.reasm_buffer();
+            if (buf.empty()) {
+                return std::nullopt;
+            }
+            size_t consumed = 0;
+            WebSocketFrame frame;
+            if (WebSocketFrame::decode(buf.data(), buf.size(), consumed, frame)) {
+                assembler.consume_bytes(consumed);
+                assembler.return_reasm_buffers();
+                return frame;
+            }
+            return std::nullopt;
+        };
+
+        while (true) {
+            // 重组缓冲区有残留时先尝试解码
+            if (assembler.has_remaining()) {
+                auto frame = try_decode();
+                if (frame) {
+                    if (frame->opcode == OpCode::Ping) {
+                        co_await write_frame(
+                            WebSocketFrame::pong(frame->payload));
+                        co_return true;
+                    }
+                    if (frame->opcode == OpCode::Close) {
+                        co_await write_frame(WebSocketFrame::close());
+                        m_closed = true;
+                        co_return false;
+                    }
+                    co_await write_frame(*frame);
+                    co_return true;
+                }
+            }
+
+            // 等待下一个数据块
+            auto chunk = co_await assembler.next_chunk();
+            if (chunk.is_eof() || chunk.is_error()) {
+                co_return false;
+            }
+
+            // 追加到重组缓冲区
+            assembler.append_chunk(chunk);
+
+            // 尝试解码
+            auto frame = try_decode();
+            if (frame) {
+                if (frame->opcode == OpCode::Ping) {
+                    co_await write_frame(
+                        WebSocketFrame::pong(frame->payload));
+                    co_return true;
+                }
+                if (frame->opcode == OpCode::Close) {
+                    co_await write_frame(WebSocketFrame::close());
+                    m_closed = true;
+                    co_return false;
+                }
+                co_await write_frame(*frame);
+                co_return true;
+            }
+
+            // 帧不完整，继续等待下一个数据块
+        }
+    }
+
     Task<void> close(uint16_t code = 1000, const std::string& reason = "") {
         if (m_closed) co_return;
         co_await write_frame(WebSocketFrame::close(code, reason));
