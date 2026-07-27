@@ -5,6 +5,7 @@
 #include "ultranet/net/read.hpp"
 #include "ultranet/net/write.hpp"
 #include "ultranet/io/io_awaitable.hpp"
+#include "ultranet/net/buffer_ring_assembler.hpp"
 #include <string>
 #include <vector>
 #include <cstring>
@@ -372,7 +373,7 @@ public:
                 co_return frame;
             }
 
-            // Frame incomplete: switch to heap if still on stack
+            // 帧不完整：栈→堆切换
             if (buf == stack_buf) {
                 heap_buf.assign(stack_buf, stack_buf + total);
                 buf = heap_buf.data();
@@ -383,6 +384,85 @@ public:
                 buf = heap_buf.data();
                 cap = heap_buf.size();
             }
+        }
+    }
+
+    // ── ring-based 帧读取 ──────────────────────────────────────────────
+    //
+    // 使用 multishot recv + buffer ring 读取帧，消除内核→用户态拷贝。
+    // 与 read_frame() 互斥使用——同一连接只能选一种读模式。
+    //
+    // assembler 需要预先 start()，BufferGroup 由调用方管理（通常所有连接共享）。
+    // 内部自动处理 Ping/Pong/Close 控制帧。
+
+    Task<WebSocketFrame> read_frame_ring(BufferRingAssembler& assembler) {
+        // 就地解码 lambda：从重组缓冲区尝试提取一个完整帧
+        auto try_decode = [&]() -> std::optional<WebSocketFrame> {
+            auto& buf = assembler.reasm_buffer();
+            if (buf.empty()) {
+                return std::nullopt;
+            }
+            size_t consumed = 0;
+            WebSocketFrame frame;
+            if (WebSocketFrame::decode(buf.data(), buf.size(), consumed, frame)) {
+                assembler.consume_bytes(consumed);
+                assembler.return_reasm_buffers();
+                return frame;
+            }
+            return std::nullopt;
+        };
+
+        while (true) {
+            // 重组缓冲区有残留数据时先尝试解码
+            if (assembler.has_remaining()) {
+                auto frame = try_decode();
+                if (frame) {
+                    if (frame->opcode == OpCode::Ping) {
+                        co_await write_frame(
+                            WebSocketFrame::pong(frame->payload));
+                        continue;
+                    }
+                    if (frame->opcode == OpCode::Close) {
+                        co_await write_frame(WebSocketFrame::close());
+                        m_closed = true;
+                    }
+                    co_return *frame;
+                }
+            }
+
+            // 等待下一个 buffer ring 数据块
+            auto chunk = co_await assembler.next_chunk();
+            if (chunk.is_eof()) {
+                throw std::system_error(
+                    io::make_io_error(ECONNRESET),
+                    "websocket ring recv: connection closed");
+            }
+            if (chunk.is_error()) {
+                throw std::system_error(
+                    io::make_io_error(-chunk.res),
+                    "websocket ring recv: error");
+            }
+
+            // 追加数据到重组缓冲区
+            assembler.append_chunk(chunk);
+
+            // 尝试解码完整帧
+            auto frame = try_decode();
+            if (frame) {
+                // 处理控制帧
+                if (frame->opcode == OpCode::Ping) {
+                    co_await write_frame(
+                        WebSocketFrame::pong(frame->payload));
+                    continue;
+                }
+                if (frame->opcode == OpCode::Close) {
+                    co_await write_frame(WebSocketFrame::close());
+                    m_closed = true;
+                }
+                co_return *frame;
+            }
+
+            // 帧不完整，继续等待下一个数据块
         }
     }
 

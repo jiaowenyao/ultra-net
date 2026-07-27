@@ -1,31 +1,25 @@
 #pragma once
 
-// BufferRingAssembler — buffer ring 帧重组器。
+// BufferRingAssembler — buffer ring 数据重组器。
 //
 // 封装 multishot recv 的完整生命周期：
 //   1. 提交 multishot recv SQE（1 次）
 //   2. 接收 buffer ring 数据块（N 次 CQE）
 //   3. 在内部重组缓冲区中累积数据
-//   4. 尝试解码完整的 WebSocket 帧
-//   5. 归还 buffer 到 ring
+//   4. 归还 buffer 到 ring
 //
-// 优化：
-//   - 小帧（≤1 buffer，如 64B echo）：数据在 ring buffer 上零拷贝，
-//     decode 后 writev 直接引用 payload，无需额外拷贝。
-//   - 大帧（>1 buffer）：分块拷贝到重组缓冲区，完整帧解码后归还全部 buffer。
+// 与具体协议无关——只负责 buffer 生命周期管理和数据累积。
+// WebSocket 帧解码在 websocket.hpp 的 read_frame_ring() 中完成。
 //
-// 用法（WebSocket 内部）：
+// 用法：
 //   BufferRingAssembler assembler;
 //   assembler.start(fd, bg);
 //   while (!assembler.is_stopped()) {
 //       auto chunk = co_await assembler.next_chunk();
 //       if (chunk.is_eof() || chunk.is_error()) break;
 //       assembler.append_chunk(chunk);
-//       auto frame = assembler.try_decode_frame();
-//       if (frame) {
-//           assembler.return_reasm_buffers();
-//           // 使用 frame...
-//       }
+//       // ... 从 assembler.reasm_buffer() 读取数据解码 ...
+//       // ... 解码成功后 assembler.consume_bytes(n) + assembler.return_reasm_buffers() ...
 //   }
 //   assembler.cleanup();
 
@@ -33,9 +27,7 @@
 #include "ultranet/io/io_callback.hpp"
 #include "ultranet/buffer/buffer.h"
 #include "ultranet/coroutine/task.hpp"
-#include "ultranet/net/websocket.hpp"
 #include <vector>
-#include <optional>
 #include <cstring>
 
 namespace ynet::async::net {
@@ -126,47 +118,31 @@ public:
         m_pending_bids.push_back(bid);
     }
 
-    // ── 尝试解码帧 ────────────────────────────────────────────────────
+    // ── 从重组缓冲区消费数据 ──────────────────────────────────────────
     //
-    // 从重组缓冲区尝试解码一个完整的 WebSocket 帧。
-    // 返回解码后的帧，若数据不完整则返回 std::nullopt。
-    // 解码成功后，已消费的数据从重组缓冲区中移除（剩余数据保留用于下一帧）。
+    // 解码成功后调用，移除前 n 字节。
+    // 若 n <= m_reasm.size()，移除后剩余数据前移。
+    // 若 n == m_reasm.size()，直接清空。
 
-    std::optional<websocket::WebSocketFrame> try_decode_frame()
+    void consume_bytes(size_t n)
     {
-        if (m_reasm.empty())
+        if (n >= m_reasm.size())
         {
-            return std::nullopt;
+            m_reasm.clear();
         }
-
-        size_t consumed = 0;
-        websocket::WebSocketFrame frame;
-        if (websocket::WebSocketFrame::decode(
-                m_reasm.data(), m_reasm.size(), consumed, frame))
+        else
         {
-            // 移除已消费的数据
-            if (consumed < m_reasm.size())
-            {
-                // 缓冲区里有多个帧的残留数据（合法但罕见）
-                std::memmove(m_reasm.data(),
-                             m_reasm.data() + consumed,
-                             m_reasm.size() - consumed);
-                m_reasm.resize(m_reasm.size() - consumed);
-            }
-            else
-            {
-                m_reasm.clear();
-            }
-            return frame;
+            std::memmove(m_reasm.data(),
+                         m_reasm.data() + n,
+                         m_reasm.size() - n);
+            m_reasm.resize(m_reasm.size() - n);
         }
-
-        return std::nullopt;
     }
 
     // ── Buffer 回收 ────────────────────────────────────────────────────
     //
-    // 归还本次帧重组中使用的所有 buffer 到 ring，然后通知内核。
-    // 调用时机：成功解码一个帧后。
+    // 归还本轮累积的所有 buffer 到 ring，然后通知内核。
+    // 调用时机：成功消费一轮数据后（如解码完一个帧）。
 
     void return_reasm_buffers()
     {
@@ -193,13 +169,18 @@ public:
         return m_started;
     }
 
-    // 重组缓冲区是否有残留数据（前帧解码后的下一帧片段）
+    // 重组缓冲区是否有残留数据（前一轮解码后的下一帧片段）
     bool has_remaining() const
     {
         return !m_reasm.empty();
     }
 
     const std::vector<uint8_t>& reasm_buffer() const
+    {
+        return m_reasm;
+    }
+
+    std::vector<uint8_t>& reasm_buffer()
     {
         return m_reasm;
     }
