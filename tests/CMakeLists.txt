@@ -148,3 +148,7 @@ target_link_libraries(ws_gbench_full ultranet pthread benchmark)
 add_executable(echo_multishot echo_multishot.cc)
 target_link_libraries(echo_multishot ultranet pthread)
 
+add_executable(recv_multishot_test recv_multishot_test.cc)
+target_include_directories(recv_multishot_test PRIVATE ${GTest_INCLUDE_DIR})
+target_link_libraries(recv_multishot_test PRIVATE ultranet pthread gtest gtest_main)
+
