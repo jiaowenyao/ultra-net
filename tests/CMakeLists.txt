@@ -151,6 +151,9 @@ target_link_libraries(echo_multishot ultranet pthread)
 add_executable(ws_ring_echo_self ws_ring_echo_self.cc)
 target_link_libraries(ws_ring_echo_self ultranet pthread)
 
+add_executable(ws_ring_concurrent ws_ring_concurrent.cc)
+target_link_libraries(ws_ring_concurrent ultranet pthread)
+
 add_executable(mshot_recv_minimal mshot_recv_minimal.cc)
 target_link_libraries(mshot_recv_minimal ultranet pthread)
 
