@@ -227,6 +227,76 @@ struct WebSocketFrame {
     }
 };
 
+// ── Inline 帧头解析 ────────────────────────────────────────────────
+//
+// 从裸缓冲区直接解析帧头，不拷贝 payload。用于 echo 快速路径。
+// payload_ptr==nullptr 表示缓冲区数据不足以包含完整帧（需更多数据）。
+// 解析逻辑与 WebSocketFrame::decode 一致——修改 decode 时此处也需同步。
+
+struct InlineFrameInfo {
+    OpCode opcode = OpCode::Text;
+    bool fin = true;
+    bool masked = false;
+    uint32_t mask_key = 0;
+    const uint8_t* payload_ptr = nullptr;  // nullptr = 数据不完整
+    size_t payload_len = 0;
+    size_t header_len = 0;    // 帧头总字节数（含 mask key）
+    size_t total_consumed = 0; // header_len + payload_len
+};
+
+inline InlineFrameInfo parse_inline_frame(const uint8_t* data, size_t len)
+{
+    InlineFrameInfo info{};
+    if (len < 2)
+    {
+        return info;  // payload_ptr 保持 nullptr
+    }
+
+    info.fin = (data[0] & 0x80) != 0;
+    info.opcode = static_cast<OpCode>(data[0] & 0x0F);
+    info.masked = (data[1] & 0x80) != 0;
+    uint64_t plen = data[1] & 0x7F;
+    size_t pos = 2;
+
+    if (plen == 126)
+    {
+        if (len < 4) { return info; }
+        plen = (static_cast<uint64_t>(data[2]) << 8) | data[3];
+        pos = 4;
+    }
+    else if (plen == 127)
+    {
+        if (len < 10) { return info; }
+        plen = 0;
+        for (int i = 0; i < 8; ++i)
+        {
+            plen = (plen << 8) | data[2 + i];
+        }
+        pos = 10;
+    }
+
+    if (info.masked)
+    {
+        if (len < pos + 4) { return info; }
+        info.mask_key = (static_cast<uint32_t>(data[pos]) << 24)
+                      | (static_cast<uint32_t>(data[pos + 1]) << 16)
+                      | (static_cast<uint32_t>(data[pos + 2]) << 8)
+                      | data[pos + 3];
+        pos += 4;
+    }
+
+    if (pos + plen > len)
+    {
+        return info;  // 帧跨缓冲区边界，数据不完整
+    }
+
+    info.payload_ptr = data + pos;
+    info.payload_len = static_cast<size_t>(plen);
+    info.header_len = pos;
+    info.total_consumed = pos + static_cast<size_t>(plen);
+    return info;
+}
+
 // === WebSocket ===
 
 class WebSocket : ynet::utils::Noncopyable {
@@ -571,10 +641,10 @@ public:
     }
 
     // 内联 echo：读帧→写回，payload 不离开协程上下文。
-    // 消除跨协程传递开销（虽仍有 decode 拷贝，但避免 frame 对象的跨帧传递）。
+    // 快速路径：inline 帧头解析 + writev 直接引用 buffer 中的 payload（零拷贝）。
+    // 慢路径：帧跨读取边界时退到 WebSocketFrame::decode。
     // 返回 false 表示连接关闭。
     Task<bool> echo_inplace() {
-        // 复用 read_frame 的逻辑，但在同一协程内完成 echo
         uint8_t stack_buf[WS_READ_BUF];
         std::vector<uint8_t> heap_buf;
         uint8_t* buf = stack_buf;
@@ -587,35 +657,68 @@ public:
             if (*r == 0) { co_return false; }
             total += *r;
 
-            size_t consumed = 0;
-            WebSocketFrame frame;
-            if (WebSocketFrame::decode(buf, total, consumed, frame)) {
-                bool ok = true;
-                if (frame.opcode == OpCode::Ping) {
-                    co_await write_frame(WebSocketFrame::pong(frame.payload));
-                } else if (frame.opcode == OpCode::Close) {
+            // ═══ 快速路径：inline 帧头解析，零拷贝 ═══
+            auto info = parse_inline_frame(buf, total);
+            if (info.payload_ptr)
+            {
+                const uint8_t* payload = info.payload_ptr;
+
+                // 原地解掩码（修改用户缓冲区，安全——下一轮 read 会覆盖）
+                if (info.masked)
+                {
+                    auto* mp = const_cast<uint8_t*>(payload);
+                    for (size_t i = 0; i < info.payload_len; ++i)
+                    {
+                        mp[i] ^= static_cast<uint8_t>(
+                            (info.mask_key >> (8 * (3 - (i % 4)))) & 0xFF);
+                    }
+                }
+
+                if (info.opcode == OpCode::Ping)
+                {
+                    std::string pd(reinterpret_cast<const char*>(payload),
+                                   info.payload_len);
+                    co_await write_frame(WebSocketFrame::pong(pd));
+                }
+                else if (info.opcode == OpCode::Close)
+                {
                     co_await write_frame(WebSocketFrame::close());
                     m_closed = true;
                     co_return false;
-                } else {
-                    co_await write_frame(frame);
                 }
-                if (consumed < total) {
-                    std::memmove(buf, buf + consumed, total - consumed);
-                    total -= consumed;
-                } else {
+                else
+                {
+                    // Text/Binary/Continuation：writev 直接引用 buffer 中的 payload
+                    co_await write_frame_raw(info.opcode, info.fin,
+                                             payload, info.payload_len);
+                }
+
+                // 移除已消费数据
+                if (info.total_consumed < total)
+                {
+                    std::memmove(buf, buf + info.total_consumed,
+                                 total - info.total_consumed);
+                    total -= info.total_consumed;
+                }
+                else
+                {
                     total = 0;
                 }
                 co_return true;
             }
 
-            if (buf == stack_buf && total >= cap) {
+            // ── 慢路径：帧跨越读取边界，继续累积数据 ──
+            if (buf == stack_buf && total >= cap)
+            {
                 heap_buf.assign(stack_buf, stack_buf + total);
-                buf = heap_buf.data(); cap = heap_buf.capacity();
+                buf = heap_buf.data();
+                cap = heap_buf.capacity();
             }
-            if (total >= cap) {
+            if (total >= cap)
+            {
                 heap_buf.resize(cap + WS_READ_CHUNK);
-                buf = heap_buf.data(); cap = heap_buf.size();
+                buf = heap_buf.data();
+                cap = heap_buf.size();
             }
         }
     }
@@ -669,106 +772,50 @@ public:
                 co_return false;
             }
 
-            // ═══ 快速路径：尝试直接从 ring buffer 解析单 buffer 帧 ═══
+            // ═══ 快速路径：inline 帧头解析，零拷贝 ═══
             auto* bg = assembler.buffer_group();
-            bool fast_ok = false;
-            if (bg && chunk.res >= 2)
+            if (bg)
             {
                 auto* raw = static_cast<const uint8_t*>(
                     bg->get_buffer(chunk.buffer_id()));
                 size_t len = static_cast<size_t>(chunk.res);
+                auto info = parse_inline_frame(raw, len);
 
-                // 解析帧头
-                bool fin = (raw[0] & 0x80) != 0;
-                auto opcode = static_cast<OpCode>(raw[0] & 0x0F);
-                bool masked = (raw[1] & 0x80) != 0;
-                uint64_t plen = raw[1] & 0x7F;
-                size_t pos = 2;
+                if (info.payload_ptr)
+                {
+                    const uint8_t* payload = info.payload_ptr;
 
-                // 扩展长度字段
-                if (plen == 126)
-                {
-                    if (len < 4) { goto append_slow; }
-                    plen = (static_cast<uint64_t>(raw[2]) << 8) | raw[3];
-                    pos = 4;
-                }
-                else if (plen == 127)
-                {
-                    if (len < 10) { goto append_slow; }
-                    plen = 0;
-                    for (int i = 0; i < 8; ++i)
+                    // 原地解掩码（ring buffer 在 return 前不会被内核触碰）
+                    if (info.masked)
                     {
-                        plen = (plen << 8) | raw[2 + i];
-                    }
-                    pos = 10;
-                }
-
-                // 掩码键
-                uint32_t mask_key = 0;
-                if (masked)
-                {
-                    if (len < pos + 4) { goto append_slow; }
-                    mask_key = (static_cast<uint32_t>(raw[pos]) << 24)
-                             | (static_cast<uint32_t>(raw[pos + 1]) << 16)
-                             | (static_cast<uint32_t>(raw[pos + 2]) << 8)
-                             | raw[pos + 3];
-                    pos += 4;
-                }
-
-                // 检查 payload 是否完整在此 buffer 内
-                if (pos + plen > len)
-                {
-                    goto append_slow;
-                }
-
-                // ── 快速路径：零拷贝处理 ──────────────────────────
-                const uint8_t* payload_ptr = raw + pos;
-
-                if (opcode == OpCode::Ping)
-                {
-                    // Ping→Pong：payload 小，拷贝可接受
-                    std::string ping_data(
-                        reinterpret_cast<const char*>(payload_ptr), plen);
-                    if (masked)
-                    {
-                        for (size_t i = 0; i < plen; ++i)
-                        {
-                            ping_data[i] ^= static_cast<char>(
-                                (mask_key >> (8 * (3 - (i % 4)))) & 0xFF);
-                        }
-                    }
-                    co_await write_frame(WebSocketFrame::pong(ping_data));
-                    fast_ok = true;
-                }
-                else if (opcode == OpCode::Close)
-                {
-                    co_await write_frame(WebSocketFrame::close());
-                    m_closed = true;
-                    bg->return_buffer(chunk.buffer_id());
-                    bg->advance_ring(1);
-                    co_return false;
-                }
-                else if (opcode == OpCode::Text || opcode == OpCode::Binary ||
-                         opcode == OpCode::Continuation)
-                {
-                    // 原地解掩码——ring buffer 在 return 前不会被内核触碰
-                    if (masked && plen > 0)
-                    {
-                        auto* mp = const_cast<uint8_t*>(payload_ptr);
-                        for (size_t i = 0; i < plen; ++i)
+                        auto* mp = const_cast<uint8_t*>(payload);
+                        for (size_t i = 0; i < info.payload_len; ++i)
                         {
                             mp[i] ^= static_cast<uint8_t>(
-                                (mask_key >> (8 * (3 - (i % 4)))) & 0xFF);
+                                (info.mask_key >> (8 * (3 - (i % 4)))) & 0xFF);
                         }
                     }
 
-                    // writev 直接引用 ring buffer 中的 payload（零拷贝）
-                    co_await write_frame_raw(opcode, fin, payload_ptr, plen);
-                    fast_ok = true;
-                }
+                    if (info.opcode == OpCode::Ping)
+                    {
+                        std::string pd(reinterpret_cast<const char*>(payload),
+                                       info.payload_len);
+                        co_await write_frame(WebSocketFrame::pong(pd));
+                    }
+                    else if (info.opcode == OpCode::Close)
+                    {
+                        co_await write_frame(WebSocketFrame::close());
+                        m_closed = true;
+                        bg->return_buffer(chunk.buffer_id());
+                        bg->advance_ring(1);
+                        co_return false;
+                    }
+                    else
+                    {
+                        co_await write_frame_raw(info.opcode, info.fin,
+                                                 payload, info.payload_len);
+                    }
 
-                if (fast_ok)
-                {
                     bg->return_buffer(chunk.buffer_id());
                     bg->advance_ring(1);
                     co_return true;

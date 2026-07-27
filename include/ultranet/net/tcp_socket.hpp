@@ -22,7 +22,12 @@ class TcpSocket : ynet::utils::Noncopyable {
 public:
     TcpSocket() noexcept = default;
 
-    explicit TcpSocket(int fd) noexcept : m_fd(fd) {}
+    explicit TcpSocket(int fd) noexcept : m_fd(fd) {
+        if (m_fd >= 0) {
+            int opt = 1;
+            setsockopt(m_fd, IPPROTO_TCP, TCP_NODELAY, &opt, sizeof(opt));
+        }
+    }
 
     ~TcpSocket() {
         if (m_fd >= 0) ::close(m_fd);
