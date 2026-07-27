@@ -19,6 +19,7 @@
 
 #include "ultranet/ultranet.h"
 #include "ultranet/net/websocket.hpp"
+#include "ultranet/net/buffer_ring_assembler.hpp"
 #include "ultranet/lifecycle/shutdown.hpp"
 #include <functional>
 #include <chrono>
@@ -85,6 +86,15 @@ public:
     // 设置 Ping 间隔（秒），0 表示禁用心跳。默认 30 秒。
     void set_ping_interval(int secs) { m_ping_secs = secs; }
 
+    // 启用 buffer ring 模式——使用 multishot recv 消除内核→用户态拷贝。
+    // 在 serve() 之前调用。每个工作线程自动注册独立的 buffer group。
+    void enable_ring_mode(size_t ring_entries = 256,
+                          size_t buf_size = 4096) {
+        m_ring_mode = true;
+        m_ring_entries = ring_entries;
+        m_ring_buf_size = buf_size;
+    }
+
     uint16_t port() const { return m_actual_port; }
 
     // ── 启动 ────────────────────────────────────────────────────────
@@ -138,6 +148,11 @@ private:
     uint16_t m_actual_port = 0;
     int m_ping_secs = 30;
 
+    // buffer ring 模式配置
+    bool m_ring_mode{false};
+    size_t m_ring_entries{256};
+    size_t m_ring_buf_size{4096};
+
     WsTextHandler   m_on_text;
     WsBinaryHandler m_on_binary;
     WsOpenHandler   m_on_open;
@@ -174,8 +189,20 @@ private:
         // 4. 通知用户连接建立
         if (m_on_open) { co_await m_on_open(conn); }
 
-        // 5. 读帧主循环
-        co_await read_loop(conn);
+        // 5. 读帧主循环（传统 or ring 路径）
+        if (m_ring_mode) {
+            // 每个工作线程注册独立的 buffer group（idempotent）
+            auto* engine = IoUringEngine::current();
+            auto& bg = engine->register_buffer_group(
+                1, m_ring_entries, m_ring_buf_size);
+
+            BufferRingAssembler assembler;
+            assembler.start(conn.m_ws.socket().fd(), bg);
+            co_await read_loop_ring(conn, assembler);
+            assembler.cleanup();
+        } else {
+            co_await read_loop(conn);
+        }
 
         // 6. 通知用户连接关闭
         conn.m_open = false;
@@ -215,6 +242,57 @@ private:
                 frag_buf.insert(frag_buf.end(),
                     frame.payload.begin(), frame.payload.end());
                 if (!frame.fin) { break; }  // 等待更多分片
+
+                if (frame.opcode == websocket::OpCode::Text && m_on_text) {
+                    std::string msg(frag_buf.begin(), frag_buf.end());
+                    frag_buf.clear();
+                    co_await m_on_text(conn, std::move(msg));
+                } else if (frame.opcode == websocket::OpCode::Binary && m_on_binary) {
+                    auto payload = std::move(frag_buf);
+                    frag_buf.clear();
+                    co_await m_on_binary(conn, std::move(payload));
+                } else {
+                    frag_buf.clear();
+                }
+                break;
+
+            default:
+                break;
+            }
+        }
+    }
+
+    // ── ring-based 帧读循环 ──────────────────────────────────────────
+    //
+    // 使用 multishot recv + buffer ring 替代传统 read()。
+    // Ping/Pong/Close 自动处理，分片帧自动重组，与 read_loop 行为一致。
+
+    Task<void> read_loop_ring(WsConn& conn, BufferRingAssembler& assembler) {
+        std::vector<uint8_t> frag_buf;
+
+        while (conn.is_open() && !assembler.is_stopped()) {
+            auto frame = co_await conn.m_ws.read_frame_ring(assembler);
+
+            switch (frame.opcode) {
+            case websocket::OpCode::Close:
+                co_await conn.m_ws.close(1000);
+                conn.m_open = false;
+                co_return;
+
+            case websocket::OpCode::Ping:
+                co_await conn.m_ws.send_pong(
+                    std::string(frame.payload.begin(), frame.payload.end()));
+                break;
+
+            case websocket::OpCode::Pong:
+                break;
+
+            case websocket::OpCode::Text:
+            case websocket::OpCode::Binary:
+                // 收集分片
+                frag_buf.insert(frag_buf.end(),
+                    frame.payload.begin(), frame.payload.end());
+                if (!frame.fin) { break; }
 
                 if (frame.opcode == websocket::OpCode::Text && m_on_text) {
                     std::string msg(frag_buf.begin(), frag_buf.end());
