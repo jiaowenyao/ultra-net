@@ -21,11 +21,14 @@ using namespace ynet::async::lifecycle;
 int main(int argc, char** argv) {
     uint16_t port = argc > 1 ? static_cast<uint16_t>(atoi(argv[1])) : 9800;
     std::string mode = argc > 2 ? argv[2] : "trad";
+    size_t buf_size = argc > 3 ? static_cast<size_t>(atoi(argv[3])) : 4096;
+    size_t ring_entries = argc > 4 ? static_cast<size_t>(atoi(argv[4])) : 256;
 
-    std::cout << "=== ultra-net Raw Echo (mode=" << mode << ") ===\n";
-    std::cout << "Port: " << port << "\n";
+    std::cout << "=== ultra-net Raw Echo (mode=" << mode
+              << " buf=" << buf_size << " entries=" << ring_entries << ") ===\n";
+    std::cout << "Port: " << port << " ring_mem=" << (buf_size * ring_entries / 1024) << "KB\n";
 
-    Launcher().threads(2).run([port, &mode]() -> Task<void> {
+    Launcher().threads(2).run([port, &mode, buf_size, ring_entries]() -> Task<void> {
         auto sock = co_await Socket(AF_INET, SOCK_STREAM, 0);
         int lfd = *sock;
         int opt = 1;
@@ -47,7 +50,7 @@ int main(int argc, char** argv) {
 
             auto* sched = ExecutionContext::current();
             if (sched) {
-                sched->submit([cfd, mode](int client_fd) -> Task<void> {
+                sched->submit([cfd, mode, buf_size, ring_entries](int client_fd) -> Task<void> {
                     TcpSocket cs(client_fd);
                     websocket::WebSocket ws(std::move(cs));
 
@@ -64,7 +67,7 @@ int main(int argc, char** argv) {
                     if (mode == "ring") {
                         // 每线程独立注册 buffer group（idempotent）
                         auto* engine = IoUringEngine::current();
-                        auto& bg = engine->register_buffer_group(1, 256, 4096);
+                        auto& bg = engine->register_buffer_group(1, ring_entries, buf_size);
                         BufferRingAssembler assembler;
                         assembler.start(client_fd, bg);
                         while (co_await ws.echo_inplace_ring(assembler)) {}
