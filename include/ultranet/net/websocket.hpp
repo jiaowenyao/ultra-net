@@ -285,15 +285,17 @@ inline InlineFrameInfo parse_inline_frame(const uint8_t* data, size_t len)
         pos += 4;
     }
 
+    // 始终设置 total_consumed——即使数据不完整，调用方也能知道需要累积多少字节
+    info.header_len = pos;
+    info.payload_len = static_cast<size_t>(plen);
+    info.total_consumed = pos + static_cast<size_t>(plen);
+
     if (pos + plen > len)
     {
-        return info;  // 帧跨缓冲区边界，数据不完整
+        return info;  // 帧跨缓冲区边界，数据不完整（payload_ptr 保持 nullptr）
     }
 
     info.payload_ptr = data + pos;
-    info.payload_len = static_cast<size_t>(plen);
-    info.header_len = pos;
-    info.total_consumed = pos + static_cast<size_t>(plen);
     return info;
 }
 
@@ -627,6 +629,55 @@ public:
         }
     }
 
+    // ── 多 segment 零拷贝写帧 ──────────────────────────────────────
+    //
+    // 帧头栈编码 + 多段 payload iovec（用于跨 ring buffer 帧）。
+    // 与 write_frame_raw 的区别：payload 分散在多个不连续的内存段中。
+    // segments 中的 iov_len 之和必须等于 payload_len。
+
+    Task<void> write_frame_raw_multi(OpCode opcode, bool fin,
+                                     const std::vector<iovec>& segments,
+                                     size_t payload_len) {
+        uint8_t hdr[14];
+        uint8_t* p = hdr;
+        *p++ = static_cast<uint8_t>((fin ? 0x80 : 0x00) |
+                                     (static_cast<uint8_t>(opcode) & 0x0F));
+        if (payload_len < 126) {
+            *p++ = static_cast<uint8_t>(payload_len | (m_masked ? 0x80 : 0x00));
+        } else if (payload_len <= 65535) {
+            *p++ = static_cast<uint8_t>(126 | (m_masked ? 0x80 : 0x00));
+            *p++ = static_cast<uint8_t>(payload_len >> 8);
+            *p++ = static_cast<uint8_t>(payload_len);
+        } else {
+            *p++ = static_cast<uint8_t>(127 | (m_masked ? 0x80 : 0x00));
+            for (int i = 7; i >= 0; --i) {
+                *p++ = static_cast<uint8_t>(payload_len >> (i * 8));
+            }
+        }
+        if (m_masked) {
+            uint32_t mk = 0;
+            *p++ = static_cast<uint8_t>(mk >> 24);
+            *p++ = static_cast<uint8_t>(mk >> 16);
+            *p++ = static_cast<uint8_t>(mk >> 8);
+            *p++ = static_cast<uint8_t>(mk);
+        }
+        size_t hdr_len = static_cast<size_t>(p - hdr);
+
+        // 构建完整 iovec: [header] + [各 payload 段]
+        std::vector<iovec> iov;
+        iov.reserve(segments.size() + 1);
+        iov.push_back({hdr, hdr_len});
+        for (auto& seg : segments) {
+            iov.push_back(seg);
+        }
+
+        auto w = co_await io::Writev(m_socket.fd(), iov.data(),
+                                     static_cast<int>(iov.size()));
+        if (!w) {
+            throw std::system_error(w.error(), "websocket write failed");
+        }
+    }
+
     Task<void> send_text(std::string data) {
         co_return co_await write_frame(WebSocketFrame::text(std::move(data)));
     }
@@ -731,40 +782,7 @@ public:
 
     Task<bool> echo_inplace_ring(BufferRingAssembler& assembler) {
         // 慢路径：走 assembler 重组 + WebSocketFrame::decode 流程
-        auto slow_try_decode = [&]() -> std::optional<WebSocketFrame> {
-            auto& buf = assembler.reasm_buffer();
-            if (buf.empty()) {
-                return std::nullopt;
-            }
-            size_t consumed = 0;
-            WebSocketFrame frame;
-            if (WebSocketFrame::decode(buf.data(), buf.size(), consumed, frame)) {
-                assembler.consume_bytes(consumed);
-                assembler.return_reasm_buffers();
-                return frame;
-            }
-            return std::nullopt;
-        };
-
         while (true) {
-            // 重组缓冲区有残留时走慢路径解码
-            if (assembler.has_remaining()) {
-                auto frame = slow_try_decode();
-                if (frame) {
-                    if (frame->opcode == OpCode::Ping) {
-                        co_await write_frame(
-                            WebSocketFrame::pong(frame->payload));
-                        co_return true;
-                    }
-                    if (frame->opcode == OpCode::Close) {
-                        co_await write_frame(WebSocketFrame::close());
-                        m_closed = true;
-                        co_return false;
-                    }
-                    co_await write_frame(*frame);
-                    co_return true;
-                }
-            }
 
             // 等待下一个 ring buffer 数据块
             auto chunk = co_await assembler.next_chunk();
@@ -772,8 +790,10 @@ public:
                 co_return false;
             }
 
-            // ═══ 快速路径：inline 帧头解析，零拷贝 ═══
             auto* bg = assembler.buffer_group();
+            bool need_slow_path = false;
+
+            // ═══ 快速路径：inline 帧头解析，零拷贝 ═══
             if (bg)
             {
                 auto* raw = static_cast<const uint8_t*>(
@@ -820,30 +840,113 @@ public:
                     bg->advance_ring(1);
                     co_return true;
                 }
+
+                // 快速路径失败：帧跨 buffer，走多 segment 零拷贝慢路径
+                need_slow_path = true;
             }
 
-        append_slow:
-            // ── 慢路径：帧跨 buffer，走 assembler 重组流程 ────────
-            assembler.append_chunk(chunk);
-            auto frame = slow_try_decode();
-            if (frame)
+            // ═══ 多 segment 零拷贝慢路径 ═══
+            if (need_slow_path && bg)
             {
-                if (frame->opcode == OpCode::Ping)
+                // 重新解析帧头获取完整帧信息
+                auto* raw = static_cast<const uint8_t*>(
+                    bg->get_buffer(chunk.buffer_id()));
+                auto info = parse_inline_frame(raw, chunk.res);
+                // info.total_consumed 已包含完整帧所需字节数
+                size_t needed = info.total_consumed;
+
+                // 记录所有 segment: (buffer_id, 指针, 长度)
+                std::vector<unsigned> bids;
+                std::vector<const uint8_t*> seg_ptrs;
+                std::vector<size_t> seg_lens;
+                size_t accumulated = chunk.res;
+
+                bids.push_back(chunk.buffer_id());
+                seg_ptrs.push_back(raw);
+                seg_lens.push_back(chunk.res);
+
+                // 继续接收后续 chunk 直到累积足够
+                while (accumulated < needed)
                 {
-                    co_await write_frame(
-                        WebSocketFrame::pong(frame->payload));
-                    co_return true;
+                    auto next_chunk = co_await assembler.next_chunk();
+                    if (next_chunk.is_eof() || next_chunk.is_error())
+                    {
+                        for (unsigned bid : bids) { bg->return_buffer(bid); }
+                        if (!bids.empty()) { bg->advance_ring(static_cast<int>(bids.size())); }
+                        co_return false;
+                    }
+                    bids.push_back(next_chunk.buffer_id());
+                    seg_ptrs.push_back(static_cast<const uint8_t*>(
+                        bg->get_buffer(next_chunk.buffer_id())));
+                    seg_lens.push_back(next_chunk.res);
+                    accumulated += next_chunk.res;
                 }
-                if (frame->opcode == OpCode::Close)
+
+                // 构建 payload iovec 列表（从 segment 0 的 header_len 偏移开始）
+                std::vector<iovec> iovs;
+                size_t remaining = info.payload_len;
+                size_t seg_idx = 0;
+                size_t seg_offset = info.header_len;
+
+                while (remaining > 0 && seg_idx < seg_lens.size())
+                {
+                    size_t avail = seg_lens[seg_idx] - seg_offset;
+                    size_t take = std::min(remaining, avail);
+                    iovs.push_back({
+                        const_cast<uint8_t*>(seg_ptrs[seg_idx] + seg_offset),
+                        take
+                    });
+                    remaining -= take;
+                    seg_idx++;
+                    seg_offset = 0;
+                }
+
+                // 原地解掩码
+                if (info.masked)
+                {
+                    size_t goff = 0;
+                    for (auto& iov_seg : iovs)
+                    {
+                        auto* mp = static_cast<uint8_t*>(iov_seg.iov_base);
+                        for (size_t i = 0; i < iov_seg.iov_len; ++i)
+                        {
+                            mp[i] ^= static_cast<uint8_t>(
+                                (info.mask_key >> (8 * (3 - ((goff + i) % 4)))) & 0xFF);
+                        }
+                        goff += iov_seg.iov_len;
+                    }
+                }
+
+                // 发送响应
+                if (info.opcode == OpCode::Ping)
+                {
+                    std::string pd;
+                    pd.reserve(info.payload_len);
+                    for (auto& s : iovs)
+                    {
+                        pd.append(static_cast<const char*>(s.iov_base), s.iov_len);
+                    }
+                    co_await write_frame(WebSocketFrame::pong(pd));
+                }
+                else if (info.opcode == OpCode::Close)
                 {
                     co_await write_frame(WebSocketFrame::close());
                     m_closed = true;
+                    for (unsigned bid : bids) { bg->return_buffer(bid); }
+                    if (!bids.empty()) { bg->advance_ring(static_cast<int>(bids.size())); }
                     co_return false;
                 }
-                co_await write_frame(*frame);
+                else
+                {
+                    co_await write_frame_raw_multi(info.opcode, info.fin,
+                                                   iovs, info.payload_len);
+                }
+
+                // 归还所有 buffer
+                for (unsigned bid : bids) { bg->return_buffer(bid); }
+                if (!bids.empty()) { bg->advance_ring(static_cast<int>(bids.size())); }
                 co_return true;
             }
-            // 帧不完整，继续等待更多数据块
         }
     }
 
