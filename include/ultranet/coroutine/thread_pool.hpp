@@ -353,18 +353,27 @@ private:
         while (!m_stop.load(std::memory_order_acquire)) {
             reactor.poll();
 
-            std::optional<UnifiedTask> task;
-            if ((task = try_get_local_task(worker_id))) {
-                (*task)();
-                continue;
-            }
-            if (try_steal_task(worker_id, task)) {
-                (*task)();
-                continue;
-            }
-            if (try_get_from_mpsc(worker_id, task)) {
-                (*task)();
-                continue;
+            // 处理全部可用任务（而非仅一个），减少协程排队深度
+            bool had_work = true;
+            while (had_work) {
+                had_work = false;
+                std::optional<UnifiedTask> task;
+
+                // 优先处理本地队列（保持缓存热度）
+                while ((task = try_get_local_task(worker_id))) {
+                    (*task)();
+                    had_work = true;
+                }
+
+                // 处理窃取和外部任务
+                if (try_steal_task(worker_id, task)) {
+                    (*task)();
+                    had_work = true;
+                }
+                if (try_get_from_mpsc(worker_id, task)) {
+                    (*task)();
+                    had_work = true;
+                }
             }
 
             reactor.wait_for_events();

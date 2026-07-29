@@ -34,13 +34,20 @@ public:
 
     // 处理所有待处理的 CQE，不阻塞。
     // eventfd CQE 在这里被拦截消费，其他 CQE 交给 m_on_completion 回调。
+    // 处理所有待处理的 CQE，不阻塞
     void poll() {
+        poll_batch(0);  // 0 = 无限制
+    }
+
+    // 分批处理 CQE——每次最多 max_cqes 个，防止队头阻塞。
+    // max_cqes=0 表示处理全部（兼容旧行为）。
+    void poll_batch(size_t max_cqes) {
         auto* engine = IoUringEngine::current();
         if (!engine) {
             return;
         }
 
-        engine->for_each_cqe([this](io_uring_cqe* cqe) {
+        engine->for_each_cqe_n(max_cqes, [this](io_uring_cqe* cqe) {
             auto* cb = reinterpret_cast<IoCallback*>(io_uring_cqe_get_data(cqe));
             if (!cb) {
                 return;
