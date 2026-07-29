@@ -160,9 +160,6 @@ target_link_libraries(ws_client_bench ultranet pthread)
 add_executable(ws_stress ws_stress.cc)
 target_link_libraries(ws_stress ultranet pthread)
 
-add_executable(mixed_io_server mixed_io_server.cc)
-target_link_libraries(mixed_io_server ultranet pthread)
-
 add_executable(http_bench_server http_bench_server.cc)
 target_link_libraries(http_bench_server ultranet pthread)
 
@@ -178,12 +175,6 @@ target_link_libraries(echo_server_standalone ultranet pthread)
 
 add_executable(echo_server_raw echo_server_raw.cc)
 target_link_libraries(echo_server_raw ultranet pthread)
-
-add_executable(mshot_recv_minimal mshot_recv_minimal.cc)
-target_link_libraries(mshot_recv_minimal ultranet pthread)
-
-add_executable(mshot_handshake_test mshot_handshake_test.cc)
-target_link_libraries(mshot_handshake_test ultranet pthread)
 
 add_executable(recv_multishot_test recv_multishot_test.cc)
 target_include_directories(recv_multishot_test PRIVATE ${GTest_INCLUDE_DIR})
