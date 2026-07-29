@@ -1,7 +1,21 @@
 @PACKAGE_INIT@
 
 include(CMakeFindDependencyMacro)
-find_dependency(liburing 2.5)
+
+# liburing (required)
+find_package(PkgConfig QUIET)
+if(PkgConfig_FOUND)
+    pkg_check_modules(liburing REQUIRED IMPORTED_TARGET liburing>=2.5)
+else()
+    find_library(liburing_LIBRARY uring)
+    find_path(liburing_INCLUDE_DIR liburing.h)
+    if(NOT liburing_LIBRARY OR NOT liburing_INCLUDE_DIR)
+        message(FATAL_ERROR "liburing>=2.5 not found")
+    endif()
+endif()
+
+# spdlog (optional — ultra-net 日志后端)
+find_package(spdlog QUIET)
 
 include("${CMAKE_CURRENT_LIST_DIR}/ultranetTargets.cmake")
 

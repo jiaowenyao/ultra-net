@@ -106,9 +106,9 @@ configure_package_config_file(
 )
 
 write_basic_package_version_file(
-    ${CMAKE_CURRENT_BINARY_DIR}/ultranetConfigVersion.cmake
+    ${CMAKE_CURRENT_BINARY_DIR}/ultranet-config-version.cmake
     VERSION ${PROJECT_VERSION}
-    COMPATIBILITY SameMajorVersion
+    COMPATIBILITY AnyNewerVersion
 )
 
 install(EXPORT ultranetTargets
@@ -119,7 +119,7 @@ install(EXPORT ultranetTargets
 
 install(FILES
     ${CMAKE_CURRENT_BINARY_DIR}/ultranet-config.cmake
-    ${CMAKE_CURRENT_BINARY_DIR}/ultranetConfigVersion.cmake
+    ${CMAKE_CURRENT_BINARY_DIR}/ultranet-config-version.cmake
     DESTINATION ${CMAKE_INSTALL_DATADIR}/cmake/ultranet
 )
 
