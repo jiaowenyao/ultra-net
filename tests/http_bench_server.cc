@@ -15,6 +15,7 @@
 #include "ultranet/net/close.hpp"
 #include "ultranet/net/socket.hpp"
 #include "ultranet/coroutine/launcher.hpp"
+#include "ultranet/coroutine/thread_pool.hpp"
 #include "ultranet/lifecycle/shutdown.hpp"
 
 using namespace ynet::async;
@@ -69,7 +70,7 @@ int main(int argc, char **argv) {
               << "B  Total: " << g_response.size() << "B\n";
 
     std::signal(SIGPIPE, SIG_IGN);
-    return Launcher().threads(4).run([port](ShutdownCoordinator& shutdown) -> Task<void> {
+    return Launcher().threads(8).run([port](ShutdownCoordinator& shutdown) -> Task<void> {
         auto sock = co_await Socket(AF_INET, SOCK_STREAM, 0);
         int lfd = *sock;
         int opt = 1;
@@ -80,18 +81,30 @@ int main(int argc, char **argv) {
         co_await Listen(lfd, 1024);
         std::cout << "[http] listening on :" << port << std::endl;
 
+        // 每个工作线程启动独立的 accept 协程——连接自然分散到各线程
+        auto* pool = static_cast<scheduling::WorkStealingThreadPool*>(
+            ExecutionContext::current());
+        size_t nthreads = pool ? pool->num_threads() : 1;
+
+        for (size_t i = 0; i < nthreads; ++i) {
+            pool->submit_on_thread(i, [](int fd, ShutdownCoordinator* sd) -> Task<void> {
+                while (!sd->is_shutdown()) {
+                    Accept acceptor(fd);
+                    acceptor.with_timeout(std::chrono::milliseconds(200));
+                    auto client = co_await acceptor;
+                    if (!client) continue;
+                    // 本线程内 dispatch——不 await，立即继续 accept
+                    auto* sched = ExecutionContext::current();
+                    if (sched) sched->submit(handle_http(*client, sd).release());
+                }
+            }(lfd, &shutdown).release());
+        }
+
+        // 等待 shutdown——主协程用超时 Accept 保持存活
         while (!shutdown.is_shutdown()) {
-            Accept acceptor(lfd);
-            acceptor.with_timeout(std::chrono::milliseconds(500));
-            auto client = co_await acceptor;
-            if (!client) {
-                int ev = client.error().value();
-                if (ev == ETIMEDOUT) continue;
-                if (ev == ECANCELED) break;
-                continue;
-            }
-            auto* sched = ExecutionContext::current();
-            if (sched) sched->submit(handle_http(*client, &shutdown).release());
+            Accept a(lfd);
+            a.with_timeout(std::chrono::milliseconds(500));
+            co_await a;  // 子协程已经在 accept，这里也会 accept 多余的连接
         }
         co_await Close(lfd);
     });
