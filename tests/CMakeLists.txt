@@ -168,6 +168,7 @@ target_link_libraries(http_mp_server ultranet pthread)
 
 # 原生 C 压测客户端——零依赖，用于第三方公平对比
 add_executable(native_ws_bench native_ws_bench.c)
+set_target_properties(native_ws_bench PROPERTIES LINKER_LANGUAGE C)
 target_link_libraries(native_ws_bench pthread)
 
 add_executable(echo_server_standalone echo_server_standalone.cc)
