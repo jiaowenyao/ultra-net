@@ -166,6 +166,9 @@ target_link_libraries(mixed_io_server ultranet pthread)
 add_executable(http_bench_server http_bench_server.cc)
 target_link_libraries(http_bench_server ultranet pthread)
 
+add_executable(http_mp_server http_mp_server.cc)
+target_link_libraries(http_mp_server ultranet pthread)
+
 # 原生 C 压测客户端——零依赖，用于第三方公平对比
 add_executable(native_ws_bench native_ws_bench.c)
 target_link_libraries(native_ws_bench pthread)
