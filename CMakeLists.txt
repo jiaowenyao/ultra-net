@@ -85,53 +85,10 @@ install(TARGETS ultranet
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
 
-# Install public headers from include/ultranet/
-install(FILES
-        ultranet/coroutine/task.hpp
-        ultranet/coroutine/scheduler.h
-        ultranet/coroutine/execution_context.hpp
-        ultranet/coroutine/thread_pool.hpp
-        ultranet/coroutine/queue.hpp
-        ultranet/coroutine/unified_task.hpp
-        ultranet/coroutine/mpsc_queue.hpp
-        ultranet/coroutine/channel.hpp
-        ultranet/io/io_engine.hpp
-        ultranet/io/io_awaitable.hpp
-        ultranet/io/timer.hpp
-        ultranet/io/io_callback.hpp
-        ultranet/io/reactor.hpp
-        ultranet/buffer/buffer.h
-        ultranet/net/socket.hpp
-        ultranet/net/bind.hpp
-        ultranet/net/listen.hpp
-        ultranet/net/accept.hpp
-        ultranet/net/read.hpp
-        ultranet/net/write.hpp
-        ultranet/net/close.hpp
-        ultranet/net/connect.hpp
-        ultranet/net/sendto.hpp
-        ultranet/net/recvfrom.hpp
-        ultranet/net/shutdown.hpp
-        ultranet/net/dns.hpp
-        ultranet/net/error.hpp
-        ultranet/net/tcp_socket.hpp
-        ultranet/coroutine/when_all.hpp
-        ultranet/coroutine/circuit_breaker.hpp
-        ultranet/coroutine/retry.hpp
-        ultranet/lifecycle/shutdown.hpp
-        ultranet/config/config.hpp
-        ultranet/net/connection_pool.hpp
-        ultranet/net/http.hpp
-        ultranet/net/websocket.hpp
-        ultranet/net/service_discovery.hpp
-        ultranet/log/logger.hpp
+# Install all public headers (entire include tree)
+install(DIRECTORY include/ultranet/
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/ultranet
-)
-
-# Install wrapper header
-install(FILES
-        include/ultranet/ultranet.h
-    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/ultranet
+    FILES_MATCHING PATTERN "*.hpp" PATTERN "*.h"
 )
 
 # CMake config files for find_package
@@ -158,12 +115,6 @@ install(EXPORT ultranetTargets
 install(FILES
     ${CMAKE_CURRENT_BINARY_DIR}/ultranet-config.cmake
     ${CMAKE_CURRENT_BINARY_DIR}/ultranetConfigVersion.cmake
-    DESTINATION ${CMAKE_INSTALL_DATADIR}/cmake/ultranet
-)
-
-# Also install the cmake module
-install(FILES
-    ${CMAKE_CURRENT_SOURCE_DIR}/cmake/Findliburing.cmake
     DESTINATION ${CMAKE_INSTALL_DATADIR}/cmake/ultranet
 )
 
