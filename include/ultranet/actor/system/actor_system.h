@@ -118,12 +118,39 @@ public:
         // 2. Check remote routing table.
         if (m_cluster) {
             std::lock_guard<std::mutex> lock(m_remote_mutex);
+            // 精确匹配
             auto it = m_remote_actors.find(uri_str);
             if (it != m_remote_actors.end()) {
                 auto proxy = get_or_create_remote_proxy(
                     it->second.uri, it->second.node_id);
                 if (proxy) {
                     return actor_ref<T>(std::move(proxy), it->second.uri);
+                }
+            }
+            // 通配匹配: 若 uri 中 node="*"，遍历全部远程 actor，
+            // 按 type + name 匹配（忽略 node_id）
+            if (uri_str.find("ultra://*/") == 0) {
+                auto slash2 = uri_str.find('/', 10);
+                if (slash2 != std::string::npos) {
+                    std::string type_name = uri_str.substr(10,
+                        slash2 - 10);
+                    std::string actor_name = uri_str.substr(slash2 + 1);
+                    for (auto& [key, entry] : m_remote_actors) {
+                        auto rs1 = key.find('/', 8);
+                        auto rs2 = key.find('/', rs1 + 1);
+                        if (rs1 != std::string::npos &&
+                            rs2 != std::string::npos) {
+                            if (key.substr(rs1 + 1, rs2 - rs1 - 1) == type_name
+                                && key.substr(rs2 + 1) == actor_name) {
+                                auto proxy = get_or_create_remote_proxy(
+                                    entry.uri, entry.node_id);
+                                if (proxy) {
+                                    return actor_ref<T>(std::move(proxy),
+                                        entry.uri);
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }

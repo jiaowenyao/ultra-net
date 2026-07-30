@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(ultranet VERSION 0.2.0 LANGUAGES C CXX)
+project(ultranet VERSION 0.3.0 LANGUAGES C CXX)
 
 # 作为子目录被引入时，确保 C 编译器可用（native_ws_bench 等 C 工具需要）
 if(NOT CMAKE_C_COMPILER)

@@ -225,6 +225,25 @@ TEST(FindTest, FindMissingReturnsInvalid) {
     EXPECT_FALSE(r.is_valid());
 }
 
+// 通配 find: 本地 actors 通配 URI 查找
+TEST(FindTest, WildcardFindLocal) {
+    actor_system sys;
+    sys.spawn<EchoActor>("wildcard-test");
+    auto uri = actor_uri::make_local(
+        typeid(EchoActor).name(), "wildcard-test").to_string();
+    auto found = sys.find<EchoActor>(uri);
+    EXPECT_TRUE(found.is_valid());
+}
+
+// 通配 find: 不存在的 actor
+TEST(FindTest, WildcardFindMissing) {
+    actor_system sys;
+    auto uri = actor_uri::make_local(
+        typeid(EchoActor).name(), "no-such-actor").to_string();
+    auto found = sys.find<EchoActor>(uri);
+    EXPECT_FALSE(found.is_valid());
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // Actor URI tests
 // ═══════════════════════════════════════════════════════════════════════
