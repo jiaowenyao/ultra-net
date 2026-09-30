@@ -192,10 +192,10 @@ void test_message_envelope_make() {
     stable_ping p{42};
     auto env = message_envelope::make(p);
     CHECK(env.msg_type == actor_type_hash<stable_ping>(), "type hash correct");
-    CHECK(env.data.size() == sizeof(stable_ping), "size correct");
+    CHECK(env.size() == sizeof(stable_ping), "size correct");
 
     stable_ping recovered;
-    std::memcpy(&recovered, env.data.data(), sizeof(stable_ping));
+    std::memcpy(&recovered, env.bytes(), sizeof(stable_ping));
     CHECK(recovered.id == 42, "value preserved");
     PASS();
 }

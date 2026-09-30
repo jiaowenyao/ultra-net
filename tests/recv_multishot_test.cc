@@ -14,12 +14,12 @@ using namespace ynet::async::io;
 TEST(RecvMultishotTest, HandlerStoresChunkWhenNoWaiter)
 {
     RecvMultishotState state;
-    on_recv_chunk_handler(&state, 512, 0x00010000);  // buffer_id=1, res=512
+    on_recv_chunk_handler(&state, 512, 0x00010000u | IORING_CQE_F_MORE);
 
-    EXPECT_TRUE(state.chunk_ready);
+    EXPECT_FALSE(state.queue.empty());
     EXPECT_FALSE(state.stopped);
-    EXPECT_EQ(state.last_res, 512);
-    EXPECT_EQ(state.last_flags, 0x00010000u);
+    EXPECT_EQ(state.queue.front().res, 512);
+    EXPECT_EQ(state.queue.front().flags, 0x00010000u | IORING_CQE_F_MORE);
 }
 
 // handler 在有等待者时恢复协程并清除 waiter
@@ -29,11 +29,11 @@ TEST(RecvMultishotTest, HandlerResumesWaiter)
 
     // 使用 std::noop_coroutine() 得到合法的空操作协程句柄，resume() 安全无副作用
     state.waiter = std::noop_coroutine();
-    on_recv_chunk_handler(&state, 256, 0x00020000);
+    on_recv_chunk_handler(&state, 256, 0x00020000u | IORING_CQE_F_MORE);
 
-    // waiter 应该被清除（恢复后置空）
     EXPECT_EQ(state.waiter, nullptr);
-    EXPECT_TRUE(state.chunk_ready);
+    EXPECT_FALSE(state.queue.empty());
+    EXPECT_FALSE(state.stopped);
 }
 
 // EOF (res=0) 设置 stopped
@@ -42,7 +42,7 @@ TEST(RecvMultishotTest, EofSetsStopped)
     RecvMultishotState state;
     on_recv_chunk_handler(&state, 0, 0);
 
-    EXPECT_TRUE(state.chunk_ready);
+    EXPECT_FALSE(state.queue.empty());
     EXPECT_TRUE(state.stopped);
 }
 
@@ -52,7 +52,7 @@ TEST(RecvMultishotTest, ErrorSetsStopped)
     RecvMultishotState state;
     on_recv_chunk_handler(&state, -ECONNRESET, 0);
 
-    EXPECT_TRUE(state.chunk_ready);
+    EXPECT_FALSE(state.queue.empty());
     EXPECT_TRUE(state.stopped);
 }
 
@@ -103,7 +103,7 @@ TEST(RecvChunkResultTest, ErrorDetection)
 TEST(RecvMultishotAwaiterTest, AwaitReadyWhenChunkAvailable)
 {
     RecvMultishotState state;
-    state.chunk_ready = true;
+    on_recv_chunk_handler(&state, 8, IORING_CQE_F_MORE);
 
     RecvMultishotAwaiter awaiter{&state};
     EXPECT_TRUE(awaiter.await_ready());
@@ -144,16 +144,14 @@ TEST(RecvMultishotAwaiterTest, AwaitSuspendStoresHandle)
 TEST(RecvMultishotAwaiterTest, AwaitResumeReturnsAndClears)
 {
     RecvMultishotState state;
-    state.last_res = 1024;
-    state.last_flags = 0x00050000;
-    state.chunk_ready = true;
+    on_recv_chunk_handler(&state, 1024, 0x00050000u | IORING_CQE_F_MORE);
 
     RecvMultishotAwaiter awaiter{&state};
     auto result = awaiter.await_resume();
 
     EXPECT_EQ(result.res, 1024);
     EXPECT_EQ(result.buffer_id(), 5u);
-    EXPECT_EQ(state.chunk_ready, false);  // 标志已被清除
+    EXPECT_TRUE(state.queue.empty());
 }
 
 // ── 完整流程模拟测试 ───────────────────────────────────────────────────
@@ -164,7 +162,7 @@ TEST(RecvMultishotIntegrationTest, HandlerBeforeAwait)
     RecvMultishotState state;
 
     // 步骤1：CQE 先到达
-    on_recv_chunk_handler(&state, 512, 0x00010000);
+    on_recv_chunk_handler(&state, 512, 0x00010000u | IORING_CQE_F_MORE);
 
     // 步骤2：协程 await（直接获取数据，无需暂停）
     RecvMultishotAwaiter awaiter{&state};
@@ -206,4 +204,25 @@ TEST(RecvMultishotIntegrationTest, ErrorFlow)
     EXPECT_TRUE(chunk.is_error());
     EXPECT_EQ(chunk.res, -ENOBUFS);
     EXPECT_TRUE(state.stopped);
+}
+
+// 协程还在写帧、没有等在 awaiter 上时，连续 CQE 不能互相覆盖。
+TEST(RecvMultishotIntegrationTest, QueuesChunksUntilConsumed)
+{
+    RecvMultishotState state;
+    on_recv_chunk_handler(&state, 10, 0x00010000u | IORING_CQE_F_MORE);
+    on_recv_chunk_handler(&state, 20, 0x00020000u | IORING_CQE_F_MORE);
+
+    RecvMultishotAwaiter first{&state};
+    ASSERT_TRUE(first.await_ready());
+    auto c1 = first.await_resume();
+    EXPECT_EQ(c1.res, 10);
+    EXPECT_EQ(c1.buffer_id(), 1u);
+
+    RecvMultishotAwaiter second{&state};
+    ASSERT_TRUE(second.await_ready());
+    auto c2 = second.await_resume();
+    EXPECT_EQ(c2.res, 20);
+    EXPECT_EQ(c2.buffer_id(), 2u);
+    EXPECT_FALSE(state.stopped);
 }

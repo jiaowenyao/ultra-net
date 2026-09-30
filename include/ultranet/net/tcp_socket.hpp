@@ -61,6 +61,14 @@ public:
         return fd;
     }
 
+    // 同步关闭并清空 fd，析构不会再关一次。
+    void close_fd() noexcept {
+        if (m_fd >= 0) {
+            ::close(m_fd);
+            m_fd = -1;
+        }
+    }
+
     static ynet::async::Task<TcpSocket> connect(
         const std::string& host, uint16_t port,
         std::chrono::milliseconds timeout = std::chrono::milliseconds(5000));

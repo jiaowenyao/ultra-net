@@ -32,6 +32,10 @@ public:
     actor_base() = default;
     virtual ~actor_base() = default;
 
+    // 非侵入式 actor_adapter 覆盖此函数，返回被包装的用户对象。
+    // 侵入式 actor 保持 nullptr，actor_ref::get() 对派生类做 static_cast。
+    virtual void* native_object() noexcept { return nullptr; }
+
     // ── 基本属性 ─────────────────────────────────────────────────────────
 
     void set_uri(const actor_uri& u) { m_uri = u; }
@@ -126,6 +130,21 @@ public:
     // 由 local_actor_proxy::deliver() 和远端消息入口调用。
     void push_envelope(message_envelope env);
 
+    // 非阻塞推入：mailbox 满或关闭中返回 false。
+    // 顺序必须为 push → 递增 m_pending → try_activate，
+    // 避免 push 失败却递增 pending 导致 pull_and_run 空转。
+    bool try_push_envelope(message_envelope env) {
+        if (m_shutting_down.load(std::memory_order_acquire)) {
+            return false;
+        }
+        if (!m_mailbox.try_push(std::move(env))) {
+            return false;
+        }
+        m_pending.fetch_add(1, std::memory_order_release);
+        try_activate();
+        return true;
+    }
+
     // 从 mailbox 中拉取消息并分发给处理器。
     // 在线程池上运行，返回是否处理了任何消息。
     bool pull_and_run();
@@ -155,7 +174,7 @@ public:
     // 在优雅关闭时使用：线程池已停止，在销毁 actor 之前处理最后的消息。
     void drain_pending() {
         auto handler = [this](message_envelope env) {
-            deliver(env.msg_type, env.data.data(), env.data.size());
+            deliver(env.msg_type, env.bytes(), env.size());
         };
         m_mailbox.drain(handler, size_t(-1));
         m_pending.store(0, std::memory_order_release);
@@ -187,27 +206,18 @@ inline void actor_base::push_envelope(message_envelope env) {
         return;
     }
 
-    // 自适应退避：忙等 → yield → 微秒级睡眠 → 阻塞回退
-    // 参考 LMAX Disruptor SleepingWaitStrategy
+    // 前 64 次让出，之后只睡 1μs。10μs/100μs 会把灌入吞吐拉到睡眠上。
+    // 成功顺序必须是 push → 递增 m_pending → try_activate。
     for (int attempt = 0; attempt < 200; ++attempt) {
         if (m_mailbox.try_push(env)) {
-            // push 成功：更新待处理计数并激活 actor
             m_pending.fetch_add(1, std::memory_order_release);
             try_activate();
             return;
         }
-        // 退避策略：0-9 忙等, 10-49 yield, 50-99 睡眠1μs,
-        // 100-149 睡眠10μs, 150-199 睡眠100μs
-        if (attempt < 10) {
-            // 忙等（预期 mailbox 很快就会有空位）
-        } else if (attempt < 50) {
+        if (attempt < 64) {
             std::this_thread::yield();
-        } else if (attempt < 100) {
-            std::this_thread::sleep_for(std::chrono::microseconds(1));
-        } else if (attempt < 150) {
-            std::this_thread::sleep_for(std::chrono::microseconds(10));
         } else {
-            std::this_thread::sleep_for(std::chrono::microseconds(100));
+            std::this_thread::sleep_for(std::chrono::microseconds(1));
         }
     }
     // 回退路径：阻塞直到 push 成功（极端背压场景）
@@ -223,7 +233,7 @@ inline bool actor_base::pull_and_run() {
 
     // 构造分发 lambda：将 mailbox 中的消息投递给 deliver()
     auto handler = [this](message_envelope env) {
-        deliver(env.msg_type, env.data.data(), env.data.size());
+        deliver(env.msg_type, env.bytes(), env.size());
     };
 
     // 批量排空 mailbox

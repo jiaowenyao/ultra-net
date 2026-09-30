@@ -187,9 +187,10 @@ public:
 
         // 判断队列状态
         if (t <= b) {
-            // 队列非空，至少有一个任务
-            T item = buf->get(b);
-
+            // 多个元素时 bottom 与 top 不重叠，拥有者直接取走。
+            // 只剩一个元素时必须先 CAS 赢下 top，再移动。
+            // 移动发生在 CAS 之前的话，失败分支会析构唯一的任务，
+            // 而另一个线程可能正在执行同一份 std::function。
             if (t == b) {
                 if (!m_top.compare_exchange_strong(
                         t, t + 1,
@@ -200,7 +201,7 @@ public:
                 }
                 m_bottom.store(b + 1, std::memory_order_relaxed);
             }
-
+            T item = buf->get(b);
             return item;
         } else {
             // 队列为空（bottom < top 是可能的，因为我们先递减了 bottom）
@@ -219,8 +220,8 @@ public:
      * 2. 加载内存屏障
      * 3. 读取 bottom
      * 4. 如果队列为空，返回空
-     * 5. 取出任务
-     * 6. 使用 CAS 递增 top
+     * 5. 使用 CAS 递增 top
+     * 6. 只有 CAS 成功才从槽里移走任务
      *
      * 窃取从 top 端进行，与 pop 从 bottom 端进行，减少了竞争
      */
@@ -237,26 +238,19 @@ public:
 
         // 检查队列是否为空
         if (t >= b) {
-            // 队列为空
             return std::nullopt;
         }
 
-        // 队列非空，尝试窃取 top 位置的任务
         CircularBuffer<T>* buf = m_buffer.load(std::memory_order_consume);
-        T item = buf->get(t);
-
-        // 使用 CAS 尝试递增 top
-        // 如果成功，说明我们成功窃取了任务
-        // 如果失败，说明有其他窃取者或者拥有者已经修改了 top
+        // 先赢得 top，再从槽里移走。CAS 失败时槽里的任务还在，不能在失败路径上析构它。
         if (!m_top.compare_exchange_strong(
                 t, t + 1,
                 std::memory_order_seq_cst,
                 std::memory_order_relaxed)) {
-            // CAS 失败，重试
-            // 注意：这里选择返回空而不是重试，让调用者决定是否重试
             return std::nullopt;
         }
 
+        T item = buf->get(t);
         return item;
     }
 

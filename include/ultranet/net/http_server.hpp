@@ -208,7 +208,9 @@ private:
                 co_await resp.send();
             }
         }
-        co_await Close(cfd);
+        // TcpSocket 持有 cfd：读循环已结束，无待完成的 io_uring 操作，
+        // 由析构函数同步 ::close 一次即可；禁止再 co_await Close(cfd)，
+        // 否则关闭 CQE 后该 fd 号可能被 accept 复用，~TcpSocket 会误关新连接。
     }
 };
 

@@ -6,6 +6,7 @@
 #include <string>
 #include <memory>
 #include <unordered_map>
+#include <vector>
 #include <mutex>
 #include <atomic>
 #include <functional>
@@ -55,6 +56,7 @@ public:
         explicit actor_adapter(Args&&... args)
             : m_instance(std::forward<Args>(args)...) {}
         T* get() { return &m_instance; }
+        void* native_object() noexcept override { return &m_instance; }
     };
 
     // ── Spawn a local actor (globally visible by type+name) ──────────
@@ -221,9 +223,8 @@ private:
     std::unordered_map<std::string, remote_entry> m_remote_actors;
     std::mutex m_remote_mutex;
 
-    // Per-node remote proxies: node_id → proxy.
-    std::unordered_map<net::node_id_t,
-                       std::shared_ptr<actor_proxy>> m_remote_proxies;
+    // 按 actor URI 字符串索引的远端代理（同节点多 actor 各自独立）。
+    std::unordered_map<std::string, std::shared_ptr<actor_proxy>> m_remote_proxies;
     std::mutex m_proxy_mutex;
 
     // ── Internal helpers ─────────────────────────────────────────────
@@ -237,6 +238,7 @@ private:
     std::shared_ptr<actor_proxy> get_or_create_remote_proxy(
         const actor_uri& uri, net::node_id_t node_id);
     void publish_actor_location(const actor_uri& uri);
+    ynet::async::Task<void> broadcast_actor_location(actor_uri uri);
     ynet::async::Task<void> connect_to_node(
         net::node_id_t node_id, const std::string& host, uint16_t port,
         std::shared_ptr<net::outbound_conn> existing_conn = nullptr);
@@ -358,7 +360,7 @@ inline ynet::async::Task<void> actor_system::handle_inbound_message(
                 if (local) {
                     message_envelope env;
                     env.msg_type = msg_type;
-                    env.data = std::move(msg_payload);
+                    env.assign_vector(std::move(msg_payload));
                     local->push_envelope(std::move(env));
                 }
             }
@@ -394,7 +396,11 @@ inline ynet::async::Task<void> actor_system::gossip_loop() {
         auto live = m_cluster->live_nodes(m_cfg.node_timeout_ms);
         std::vector<net::node_info> peers;
         auto self_id = m_cluster->self_id();
-        for (auto& n : live) { if (n.id != self_id) { peers.push_back(n); } }
+        for (auto& n : live) {
+            if (n.id != self_id) {
+                peers.push_back(n);
+            }
+        }
 
         if (!peers.empty()) {
             std::shuffle(peers.begin(), peers.end(), gen);
@@ -409,14 +415,45 @@ inline ynet::async::Task<void> actor_system::gossip_loop() {
                 auto colon = addr.rfind(':');
                 if (colon != std::string::npos) {
                     std::string host = addr.substr(0, colon);
-                    uint16_t port = static_cast<uint16_t>(std::stoi(addr.substr(colon + 1)));
+                    uint16_t port = static_cast<uint16_t>(
+                        std::stoi(addr.substr(colon + 1)));
                     // 建立连接 → 发送gossip → 复用为持久连接（避免重复建连）
-                auto conn = co_await m_transport->connect(host, port);
-                if (conn && conn->is_valid()) {
-                    co_await conn->send(payload);
-                    // 将 gossip 连接复用为持久连接，connect_to_node 不再重复建连
-                    co_await connect_to_node(peers[i].id, host, port, conn);
+                    auto conn = co_await m_transport->connect(host, port);
+                    if (conn && conn->is_valid()) {
+                        co_await conn->send(payload);
+                        // 将 gossip 连接复用为持久连接，connect_to_node 不再重复建连
+                        co_await connect_to_node(peers[i].id, host, port, conn);
+                    }
                 }
+            }
+        } else if (!m_cluster->seeds().empty()) {
+            // 尚无存活对等节点时，拨号种子以完成初始发现（一次性连接，不分配 node_id）
+            for (const auto& seed : m_cluster->seeds()) {
+                auto gossip_data = m_cluster->build_gossip();
+                std::vector<uint8_t> payload;
+                payload.push_back(static_cast<uint8_t>(dist::message_type::gossip));
+                payload.insert(payload.end(), gossip_data.begin(), gossip_data.end());
+
+                auto colon = seed.rfind(':');
+                if (colon == std::string::npos) {
+                    continue;
+                }
+                std::string host = seed.substr(0, colon);
+                uint16_t port = 0;
+                try {
+                    port = static_cast<uint16_t>(
+                        std::stoi(seed.substr(colon + 1)));
+                } catch (...) {
+                    continue;
+                }
+                try {
+                    auto conn = co_await m_transport->connect(host, port);
+                    if (conn && conn->is_valid()) {
+                        co_await conn->send(payload);
+                        // 一次性连接：成功也保留为 one-shot，不 invent node_id
+                    }
+                } catch (...) {
+                    // 连接失败忽略，坏种子不得中断 gossip 循环
                 }
             }
         }
@@ -435,35 +472,88 @@ actor_system::resolve_actor_location(const actor_uri& uri) {
 
 inline std::shared_ptr<actor_proxy>
 actor_system::get_or_create_remote_proxy(const actor_uri& uri, net::node_id_t node_id) {
+    const std::string key = uri.to_string();
     {
         std::lock_guard<std::mutex> lock(m_proxy_mutex);
-        auto it = m_remote_proxies.find(node_id);
-        if (it != m_remote_proxies.end()) { return it->second; }
+        auto it = m_remote_proxies.find(key);
+        if (it != m_remote_proxies.end()) {
+            return it->second;
+        }
     }
+    // 出站连接仍按 node_id 共享
     std::shared_ptr<net::outbound_conn> conn;
     {
         std::lock_guard<std::mutex> lock(m_conn_mutex);
         auto it = m_connections.find(node_id);
-        if (it != m_connections.end() && it->second->is_valid()) { conn = it->second; }
+        if (it != m_connections.end() && it->second->is_valid()) {
+            conn = it->second;
+        }
     }
     auto proxy = std::make_shared<dist::remote_proxy>(uri, conn, &pool());
     {
         std::lock_guard<std::mutex> lock(m_proxy_mutex);
-        m_remote_proxies[node_id] = proxy;
+        m_remote_proxies[key] = proxy;
     }
     return proxy;
 }
 
 inline void actor_system::publish_actor_location(const actor_uri& uri) {
-    if (!m_cluster) { return; }
-    std::lock_guard<std::mutex> lock(m_remote_mutex);
-    m_remote_actors[uri.to_string()] = {m_cluster->self_id(), uri};
+    if (!m_cluster) {
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lock(m_remote_mutex);
+        m_remote_actors[uri.to_string()] = {m_cluster->self_id(), uri};
+    }
+    // 向当前存活对等节点广播位置通告（失败不致命）
+    if (m_transport && m_pool) {
+        auto task = broadcast_actor_location(uri);
+        m_pool->submit_coroutine(task.release());
+    }
+}
+
+inline ynet::async::Task<void>
+actor_system::broadcast_actor_location(actor_uri uri) {
+    if (!m_cluster || !m_transport) {
+        co_return;
+    }
+    auto payload = dist::pack_actor_location(uri, 3);
+    auto live = m_cluster->live_nodes(m_cfg.node_timeout_ms);
+    auto self_id = m_cluster->self_id();
+    for (const auto& n : live) {
+        if (n.id == self_id) {
+            continue;
+        }
+        const auto& addr = n.addr;
+        auto colon = addr.rfind(':');
+        if (colon == std::string::npos) {
+            continue;
+        }
+        std::string host = addr.substr(0, colon);
+        uint16_t port = 0;
+        try {
+            port = static_cast<uint16_t>(std::stoi(addr.substr(colon + 1)));
+        } catch (...) {
+            continue;
+        }
+        try {
+            auto conn = co_await m_transport->connect(host, port);
+            if (conn && conn->is_valid()) {
+                co_await conn->send(payload);
+            }
+        } catch (...) {
+            // 连接失败忽略
+        }
+    }
+    co_return;
 }
 
 inline ynet::async::Task<void> actor_system::connect_to_node(
         net::node_id_t node_id, const std::string& host, uint16_t port,
         std::shared_ptr<net::outbound_conn> existing_conn) {
-    if (!m_transport) { co_return; }
+    if (!m_transport) {
+        co_return;
+    }
 
     // 复用已有连接（由 gossip_loop 传入，避免重复建连）
     auto conn = std::move(existing_conn);
@@ -477,25 +567,38 @@ inline ynet::async::Task<void> actor_system::connect_to_node(
             }
         }
         conn = co_await m_transport->connect(host, port);
-        if (!conn || !conn->is_valid()) { co_return; }
+        if (!conn || !conn->is_valid()) {
+            co_return;
+        }
     }
 
-    // 存储持久连接
+    // 存储持久连接（仍按 node_id 索引）
     {
         std::lock_guard<std::mutex> lock(m_conn_mutex);
         m_connections[node_id] = conn;
     }
 
-    // 排空目标为该节点的缓冲消息
-    std::shared_ptr<dist::remote_proxy> proxy;
+    // 排空目标节点上所有远端代理的缓冲消息（按 uri.node 匹配）
+    std::vector<std::shared_ptr<dist::remote_proxy>> to_flush;
     {
         std::lock_guard<std::mutex> lock(m_proxy_mutex);
-        auto it = m_remote_proxies.find(node_id);
-        if (it != m_remote_proxies.end()) {
-            proxy = std::dynamic_pointer_cast<dist::remote_proxy>(it->second);
+        const std::string node_str = std::to_string(node_id);
+        for (auto& [key, p] : m_remote_proxies) {
+            (void)key;
+            if (!p) {
+                continue;
+            }
+            if (p->uri().node == node_str) {
+                auto rp = std::dynamic_pointer_cast<dist::remote_proxy>(p);
+                if (rp) {
+                    to_flush.push_back(std::move(rp));
+                }
+            }
         }
     }
-    if (proxy) { proxy->connect_and_flush(conn); }
+    for (auto& proxy : to_flush) {
+        proxy->connect_and_flush(conn);
+    }
 }
 
 } // namespace ynet::actor

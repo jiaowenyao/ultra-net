@@ -29,9 +29,19 @@ public:
             num_threads = 1;
         }
 
-        m_event_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
-        if (m_event_fd < 0) {
-            throw std::system_error(errno, std::system_category(), "eventfd creation failed");
+        // 每个 worker 一把 eventfd。共享一把时，一次 write 只叫醒一个正在等的读，
+        // 任务却在另一个 worker 的 MPSC 里，主人会停到 100ms 超时。
+        m_event_fds.reserve(num_threads);
+        for (size_t i = 0; i < num_threads; ++i) {
+            int fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+            if (fd < 0) {
+                for (int opened : m_event_fds) {
+                    ::close(opened);
+                }
+                m_event_fds.clear();
+                throw std::system_error(errno, std::system_category(), "eventfd creation failed");
+            }
+            m_event_fds.push_back(fd);
         }
 
         // 创建工作线程的本地队列
@@ -59,14 +69,16 @@ public:
 
     ~WorkStealingThreadPool() override {
         m_stop.store(true, std::memory_order_release);
-        wake_workers(m_workers.size());
+        wake_all_workers();
         for (auto& worker : m_workers) {
             if (worker.joinable()) {
                 worker.join();
             }
         }
-        if (m_event_fd >= 0) {
-            ::close(m_event_fd);
+        for (int fd : m_event_fds) {
+            if (fd >= 0) {
+                ::close(fd);
+            }
         }
     }
 
@@ -168,7 +180,7 @@ public:
         UnifiedTask task(handle);
         if (worker_id < m_mpsc_queues.size()) {
             while (!m_mpsc_queues[worker_id]->try_push(std::move(task))) {}
-            wake_workers();
+            wake_worker(worker_id);
         } else {
             enqueue_task(std::move(task));
         }
@@ -201,7 +213,7 @@ public:
         while (!m_mpsc_queues[idx]->try_push(std::move(task))) {
             idx = m_next_worker.fetch_add(1, std::memory_order_relaxed) % m_workers.size();
         }
-        wake_workers();
+        wake_worker(idx);
     }
 
     template <typename T>
@@ -262,9 +274,20 @@ private:
         std::atomic<size_t> completed_ops{0};
     };
 
-    void wake_workers(uint64_t count = 1) {
-        uint64_t val = count;
-        ::write(m_event_fd, &val, sizeof(val));
+    // 只写这一把。EAGAIN 一般是计数溢出，不重试，析构还要继续 join。
+    void wake_worker(size_t worker_id) {
+        if (worker_id >= m_event_fds.size()) {
+            return;
+        }
+        uint64_t val = 1;
+        ssize_t written = ::write(m_event_fds[worker_id], &val, sizeof(val));
+        (void)written;
+    }
+
+    void wake_all_workers() {
+        for (size_t i = 0; i < m_event_fds.size(); ++i) {
+            wake_worker(i);
+        }
     }
 
     std::optional<UnifiedTask> try_get_local_task(size_t worker_id) {
@@ -318,6 +341,10 @@ private:
                 callback->m_multishot_handler(
                     callback->m_multishot_ctx, cqe->res, cqe->flags);
             }
+            // 拥有者已放弃且收到终止 CQE：handler 只置位，这里释放。
+            if (callback->m_dispose) {
+                delete callback;
+            }
             return;
         }
 
@@ -347,7 +374,7 @@ private:
         t_thread_local_state.worker_id = worker_id;
 
         ExecutionContext::Scope context_scope(this);
-        io::IoReactor reactor(m_event_fd, &WorkStealingThreadPool::on_io_completion,
+        io::IoReactor reactor(m_event_fds[worker_id], &WorkStealingThreadPool::on_io_completion,
                                 this, m_io_config);
 
         while (!m_stop.load(std::memory_order_acquire)) {
@@ -397,7 +424,7 @@ private:
     std::condition_variable m_completion_cv;
     std::atomic<size_t> m_active_tasks;
     Stats m_stats{};
-    int m_event_fd{-1};
+    std::vector<int> m_event_fds;
     io::IoUringEngineConfig m_io_config{};
 
     struct ThreadLocalState {

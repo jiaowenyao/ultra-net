@@ -7,10 +7,12 @@
 #include <string>
 #include <cstring>
 #include <functional>
+#include <type_traits>
 
 #include "ultranet/actor/core/actor_uri.h"
 #include "ultranet/actor/core/type_hash.h"
 #include "ultranet/actor/core/mailbox.h"
+#include "ultranet/actor/core/base_actor.h"
 
 namespace ynet::actor {
 
@@ -39,8 +41,7 @@ public:
     void deliver(uint64_t msg_type, const void* data, size_t len) override {
         message_envelope env;
         env.msg_type = msg_type;
-        env.data.assign(static_cast<const uint8_t*>(data),
-                        static_cast<const uint8_t*>(data) + len);
+        env.assign_bytes(static_cast<const uint8_t*>(data), len);
         if (m_actor) {
             m_actor->push_envelope(std::move(env));
         }
@@ -112,21 +113,27 @@ public:
             m_proxy->deliver(hash, &msg, sizeof(msg));
             return true;
         }
-        // 本地 actor：尝试非阻塞推入 mailbox
-        auto envelope = message_envelope::make(msg);
-        if (local->get_mailbox().try_push(std::move(envelope))) {
-            local->try_activate();
-            return true;
-        }
-        return false;
+        // 本地 actor：非阻塞推入并正确递增 m_pending
+        return local->try_push_envelope(message_envelope::make(msg));
     }
 
     // ── Actor 访问器 ─────────────────────────────────────────────────
 
     // 获取底层 actor 裸指针（需 static_cast 到具体类型）
     T* get() const {
-        if (m_proxy) { return static_cast<T*>(m_proxy->local_actor()); }
-        return nullptr;
+        if (!m_proxy) {
+            return nullptr;
+        }
+        actor_base* base = m_proxy->local_actor();
+        if (!base) {
+            return nullptr;
+        }
+        // 侵入式：动态类型就是 T。非侵入式：适配器不是 T，走 native_object。
+        if constexpr (std::is_base_of_v<actor_base, T>) {
+            return static_cast<T*>(base);
+        } else {
+            return static_cast<T*>(base->native_object());
+        }
     }
 
     T* operator->() const { return get(); }

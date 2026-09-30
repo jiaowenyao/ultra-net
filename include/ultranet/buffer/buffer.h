@@ -21,10 +21,12 @@ public:
     size_t entries() const noexcept { return m_entries; }
     size_t buf_size() const noexcept { return m_buf_size; }
 
-    // multishot recv buffer 回收：处理完后归还到 ring
-    void return_buffer(unsigned bid) {
+    // multishot recv buffer 回收：处理完后归还到 ring。
+    // buf_offset 是本批次内的槽位偏移（slot = (tail + buf_offset) & mask），
+    // 不是字节偏移；单次归还传 0，批量归还依次传 0,1,2,...
+    void return_buffer(unsigned bid, int buf_offset) {
         unsigned mask = m_entries - 1;
-        io_uring_buf_ring_add(m_br, get_buffer(bid), m_buf_size, bid, mask, 0);
+        io_uring_buf_ring_add(m_br, get_buffer(bid), m_buf_size, bid, mask, buf_offset);
     }
     void advance_ring(int count) {
         io_uring_buf_ring_advance(m_br, count);

@@ -81,7 +81,7 @@ public:
                          static_cast<const uint8_t*>(data),
                          static_cast<const uint8_t*>(data) + len)});
             }
-            // 缓冲区满时丢弃最旧消息 — 这是一种有意的背压策略
+            // 缓冲区满时丢弃新消息 — 这是一种有意的背压策略
         }
     }
 

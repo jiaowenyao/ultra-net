@@ -27,6 +27,7 @@
 #include "ultranet/io/io_callback.hpp"
 #include "ultranet/buffer/buffer.h"
 #include "ultranet/coroutine/task.hpp"
+#include <memory>
 #include <vector>
 #include <cstring>
 
@@ -50,17 +51,17 @@ public:
 
     // 移动构造：转移 multishot 回调的所有权
     BufferRingAssembler(BufferRingAssembler&& other) noexcept
-        : m_state(other.m_state)
+        : m_state(std::move(other.m_state))
         , m_cb(other.m_cb)
         , m_bg(other.m_bg)
         , m_pending_bids(std::move(other.m_pending_bids))
         , m_reasm(std::move(other.m_reasm))
         , m_started(other.m_started)
     {
-        // 更新 IoCallback 的 ctx 指针指向新的 m_state 地址
-        if (m_cb)
-        {
-            m_cb->m_multishot_ctx = &m_state;
+        // 状态在堆上，移动后地址不变；仍把 ctx 指回当前持有的对象。
+        if (m_cb && m_state) {
+            m_cb->m_multishot_ctx = m_state.get();
+            m_cb->m_keepalive = m_state;
         }
         other.m_cb = nullptr;
         other.m_bg = nullptr;
@@ -78,12 +79,16 @@ public:
 
     void start(int fd, io::BufferGroup& bg)
     {
+        if (!m_state) {
+            m_state = std::make_shared<io::RecvMultishotState>();
+        }
         m_bg = &bg;
+        m_state->bg = &bg;
         m_cb = io::submit_multishot_recv(fd, bg.bgid());
-        if (m_cb)
-        {
-            // 将 handler ctx 指向本对象的 RecvMultishotState
-            m_cb->m_multishot_ctx = &m_state;
+        if (m_cb) {
+            m_cb->m_multishot_ctx = m_state.get();
+            m_cb->m_keepalive = m_state;
+            m_state->owner_cb = m_cb;
             m_started = true;
         }
     }
@@ -95,7 +100,7 @@ public:
 
     Task<io::RecvChunkResult> next_chunk()
     {
-        co_return co_await io::RecvMultishotAwaiter{&m_state};
+        co_return co_await io::RecvMultishotAwaiter{m_state.get()};
     }
 
     // ── 数据追加到重组缓冲区 ──────────────────────────────────────────
@@ -146,9 +151,10 @@ public:
 
     void return_reasm_buffers()
     {
-        for (unsigned bid : m_pending_bids)
+        // buf_offset 为本批次槽位索引，须依次为 0,1,2,... 再一次性 advance
+        for (size_t i = 0; i < m_pending_bids.size(); ++i)
         {
-            m_bg->return_buffer(bid);
+            m_bg->return_buffer(m_pending_bids[i], static_cast<int>(i));
         }
         if (!m_pending_bids.empty())
         {
@@ -161,7 +167,11 @@ public:
 
     bool is_stopped() const
     {
-        return m_state.stopped;
+        if (!m_state) {
+            return false;
+        }
+        std::lock_guard<std::mutex> lock(m_state->mu);
+        return m_state->stopped;
     }
 
     bool is_started() const
@@ -198,22 +208,35 @@ public:
     void cleanup()
     {
         return_reasm_buffers();
-
-        if (m_cb)
-        {
-            // multishot recv 在 fd 关闭时自动终止
-            // 只需释放堆分配的 IoCallback
-            delete m_cb;
+        if (m_state) {
+            std::lock_guard<std::mutex> lock(m_state->mu);
+            while (!m_state->queue.empty()) {
+                auto chunk = m_state->queue.front();
+                m_state->queue.pop_front();
+                if (chunk.res > 0 && m_bg) {
+                    m_bg->return_buffer(chunk.buffer_id(), 0);
+                    m_bg->advance_ring(1);
+                }
+            }
+            // 不再 resume。终止 CQE 到达后由完成线程 delete IoCallback。
+            m_state->abandoned = true;
+            m_state->waiter = nullptr;
+            m_state->bg = m_bg;
+        }
+        if (m_cb) {
+            if (m_state) {
+                m_cb->m_keepalive = m_state;
+                m_state->owner_cb = m_cb;
+            }
             m_cb = nullptr;
         }
-
         m_started = false;
-        m_state = io::RecvMultishotState{};
         m_bg = nullptr;
     }
 
 private:
-    io::RecvMultishotState m_state{};
+    std::shared_ptr<io::RecvMultishotState> m_state{
+        std::make_shared<io::RecvMultishotState>()};
     io::IoCallback* m_cb{nullptr};
     io::BufferGroup* m_bg{nullptr};
 

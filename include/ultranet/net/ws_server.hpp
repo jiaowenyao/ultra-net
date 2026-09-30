@@ -199,6 +199,9 @@ private:
             BufferRingAssembler assembler;
             assembler.start(conn.m_ws.socket().fd(), bg);
             co_await read_loop_ring(conn, assembler);
+            // 先关 fd，内核才会投递 multishot 的终止 CQE。
+            // cleanup 只放弃回调所有权，由完成线程在终止 CQE 之后释放。
+            conn.m_ws.socket().close_fd();
             assembler.cleanup();
         } else {
             co_await read_loop(conn);
@@ -216,6 +219,7 @@ private:
 
     Task<void> read_loop(WsConn& conn) {
         std::vector<uint8_t> frag_buf;
+        websocket::OpCode frag_op = websocket::OpCode::Continuation;
 
         while (conn.is_open()) {
             auto frame = co_await conn.m_ws.read_frame();
@@ -238,21 +242,28 @@ private:
 
             case websocket::OpCode::Text:
             case websocket::OpCode::Binary:
-                // 收集分片
+            case websocket::OpCode::Continuation:
+                if (frame.opcode != websocket::OpCode::Continuation) {
+                    frag_op = frame.opcode;
+                }
                 frag_buf.insert(frag_buf.end(),
                     frame.payload.begin(), frame.payload.end());
-                if (!frame.fin) { break; }  // 等待更多分片
-
-                if (frame.opcode == websocket::OpCode::Text && m_on_text) {
+                if (!frame.fin) {
+                    break;
+                }
+                if (frag_op == websocket::OpCode::Text && m_on_text) {
                     std::string msg(frag_buf.begin(), frag_buf.end());
                     frag_buf.clear();
+                    frag_op = websocket::OpCode::Continuation;
                     co_await m_on_text(conn, std::move(msg));
-                } else if (frame.opcode == websocket::OpCode::Binary && m_on_binary) {
+                } else if (frag_op == websocket::OpCode::Binary && m_on_binary) {
                     auto payload = std::move(frag_buf);
                     frag_buf.clear();
+                    frag_op = websocket::OpCode::Continuation;
                     co_await m_on_binary(conn, std::move(payload));
                 } else {
                     frag_buf.clear();
+                    frag_op = websocket::OpCode::Continuation;
                 }
                 break;
 
@@ -269,6 +280,7 @@ private:
 
     Task<void> read_loop_ring(WsConn& conn, BufferRingAssembler& assembler) {
         std::vector<uint8_t> frag_buf;
+        websocket::OpCode frag_op = websocket::OpCode::Continuation;
 
         while (conn.is_open() && !assembler.is_stopped()) {
             auto frame = co_await conn.m_ws.read_frame_ring(assembler);
@@ -289,21 +301,28 @@ private:
 
             case websocket::OpCode::Text:
             case websocket::OpCode::Binary:
-                // 收集分片
+            case websocket::OpCode::Continuation:
+                if (frame.opcode != websocket::OpCode::Continuation) {
+                    frag_op = frame.opcode;
+                }
                 frag_buf.insert(frag_buf.end(),
                     frame.payload.begin(), frame.payload.end());
-                if (!frame.fin) { break; }
-
-                if (frame.opcode == websocket::OpCode::Text && m_on_text) {
+                if (!frame.fin) {
+                    break;
+                }
+                if (frag_op == websocket::OpCode::Text && m_on_text) {
                     std::string msg(frag_buf.begin(), frag_buf.end());
                     frag_buf.clear();
+                    frag_op = websocket::OpCode::Continuation;
                     co_await m_on_text(conn, std::move(msg));
-                } else if (frame.opcode == websocket::OpCode::Binary && m_on_binary) {
+                } else if (frag_op == websocket::OpCode::Binary && m_on_binary) {
                     auto payload = std::move(frag_buf);
                     frag_buf.clear();
+                    frag_op = websocket::OpCode::Continuation;
                     co_await m_on_binary(conn, std::move(payload));
                 } else {
                     frag_buf.clear();
+                    frag_op = websocket::OpCode::Continuation;
                 }
                 break;
 

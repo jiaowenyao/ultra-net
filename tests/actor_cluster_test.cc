@@ -1,7 +1,10 @@
 #include <iostream>
 #include <cassert>
 #include <cstring>
+#include <thread>
+#include <chrono>
 #include "ultranet/actor/net/cluster.h"
+#include "ultranet/actor.hpp"
 
 // Cluster gossip protocol tests.
 
@@ -142,6 +145,45 @@ void test_seed_nodes() {
     PASS();
 }
 
+// 同节点多 actor 必须各自持有独立 uri（proxy map 按 uri.to_string() 索引）
+void test_same_node_remote_proxy_uris() {
+    T("same-node remote proxies keep distinct uris");
+    using ynet::actor::actor_uri;
+    using ynet::actor::dist::remote_proxy;
+
+    actor_uri u1 = actor_uri::make(42, "Echo", "a1");
+    actor_uri u2 = actor_uri::make(42, "Echo", "a2");
+    CHECK(u1.node == std::to_string(42ULL), "node stored as decimal string");
+    CHECK(u1.node == u2.node, "same node string");
+    CHECK(u1.to_string() != u2.to_string(), "uri keys differ");
+
+    remote_proxy p1(u1, nullptr, nullptr);
+    remote_proxy p2(u2, nullptr, nullptr);
+    CHECK(p1.uri().to_string() == u1.to_string(), "proxy1 packs own uri");
+    CHECK(p2.uri().to_string() == u2.to_string(), "proxy2 packs own uri");
+    CHECK(p1.uri().to_string() != p2.uri().to_string(), "proxies not aliased");
+    PASS();
+}
+
+// 坏种子连接失败不得拖垮 gossip 循环
+void test_bad_seed_ignored_by_gossip() {
+    T("bad seed ignored by gossip loop");
+    using ynet::actor::actor_system;
+    using ynet::actor::system_config;
+
+    system_config cfg;
+    cfg.node_name = "seed-bad-test";
+    cfg.listen_port = 0;
+    cfg.num_threads = 2;
+    cfg.gossip_interval_ms = 50;
+    cfg.seed_nodes = {"127.0.0.1:1"};
+    actor_system sys(cfg);
+    CHECK(sys.actual_port() > 0, "port assigned");
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    CHECK(sys.actual_port() > 0, "alive after seed dial attempts");
+    PASS();
+}
+
 int main() {
     std::cout << "=== Cluster Gossip Tests ===" << std::endl;
     test_single_node();
@@ -151,6 +193,8 @@ int main() {
     test_liveness_timeout();
     test_multiple_peers();
     test_seed_nodes();
+    test_same_node_remote_proxy_uris();
+    test_bad_seed_ignored_by_gossip();
     std::cout << "\n" << g_passed << " passed, " << g_failed << " failed" << std::endl;
     return g_failed > 0 ? 1 : 0;
 }

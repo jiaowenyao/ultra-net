@@ -64,7 +64,7 @@ void test_mailbox_push_pop() {
     CHECK(popped.has_value(), "pop ok");
     CHECK(popped->msg_type == actor_type_hash<int_msg>(), "type hash preserved");
     int_msg recovered;
-    std::memcpy(&recovered, popped->data.data(), sizeof(int_msg));
+    std::memcpy(&recovered, popped->bytes(), sizeof(int_msg));
     CHECK(recovered.value == 42, "value preserved");
     CHECK(mb.empty(), "empty after pop");
     PASS();

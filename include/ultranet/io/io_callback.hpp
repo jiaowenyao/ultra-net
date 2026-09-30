@@ -4,6 +4,7 @@
 #include <atomic>
 #include <chrono>
 #include <cassert>
+#include <memory>
 #include <liburing.h>
 
 
@@ -32,6 +33,10 @@ struct IoCallback {
     bool m_is_multishot{false};
     void (*m_multishot_handler)(void* ctx, int res, unsigned cqe_flags){nullptr};
     void* m_multishot_ctx{nullptr};
+    // 终止 CQE 之后由完成线程释放。拥有者放弃回调时置位，避免提前 delete。
+    bool m_dispose{false};
+    // 让 multishot 状态活过拥有者析构，直到终止 CQE。
+    std::shared_ptr<void> m_keepalive;
 
     // 重置回调，准备重用
     void reset() noexcept {

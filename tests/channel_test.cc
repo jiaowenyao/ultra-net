@@ -312,7 +312,50 @@ Task<void> test_string_channel(scheduling::WorkStealingThreadPool& pool) {
     PASS();
 }
 
-// ========== Test 10: Producer-closes pattern ==========
+// ========== Test 10: write reservation (blocked writer vs try_write) ==========
+
+Task<void> reservation_blocked_writer(std::shared_ptr<Channel<int, 1>> ch,
+    std::atomic<bool>* done, bool* write_ok) {
+    *write_ok = co_await ch->write(2);
+    done->store(true, std::memory_order_release);
+    co_return;
+}
+
+Task<void> test_write_reservation(scheduling::WorkStealingThreadPool& pool) {
+    TEST("write reservation (capacity 1, blocked writer vs try_write)");
+    auto ch = std::make_shared<Channel<int, 1>>();
+
+    CO_CHECK(co_await ch->write(1), "initial write failed");
+    CO_CHECK(ch->full(), "channel should be full");
+
+    std::atomic<bool> writer_done{false};
+    bool write_ok = false;
+    auto wt = reservation_blocked_writer(ch, &writer_done, &write_ok);
+    pool.submit(wt.release());
+
+    co_await io::sleep_for(std::chrono::milliseconds(50));
+    CO_CHECK(!writer_done.load(), "writer should be blocked on full channel");
+
+    // 读出唯一槽位：唤醒阻塞写者并为其预留容量（schedule 常延迟到 resubmit）
+    auto v = ch->try_read();
+    CO_CHECK(v.has_value() && *v == 1, "try_read should get 1");
+
+    // 预留生效时 try_write 必须失败，否则会与唤醒的写者争抢同一槽位
+    CO_CHECK(!ch->try_write(99), "try_write must fail while woken writer holds reservation");
+
+    co_await io::sleep_for(std::chrono::milliseconds(100));
+    CO_CHECK(writer_done.load(), "blocked writer should complete");
+    CO_CHECK(write_ok, "blocked write should succeed");
+
+    auto r = co_await ch->read();
+    CO_CHECK(r.has_value() && *r == 2, "should get blocked writer's value");
+    CO_CHECK(ch->empty(), "channel should be empty");
+    CO_CHECK(!ch->try_read().has_value(), "no duplicate / extra items");
+
+    PASS();
+}
+
+// ========== Test 11: Producer-closes pattern ==========
 
 Task<void> pc_producer(std::shared_ptr<Channel<int, 8>> ch) {
     for (int i = 0; i < 50; ++i) co_await ch->write(i);
@@ -384,6 +427,9 @@ int main() {
             pool.wait_all();
 
             pool.submit(test_string_channel(pool).release());
+            pool.wait_all();
+
+            pool.submit(test_write_reservation(pool).release());
             pool.wait_all();
 
             pool.submit(test_producer_closes(pool).release());

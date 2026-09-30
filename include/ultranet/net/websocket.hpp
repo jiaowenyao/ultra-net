@@ -577,10 +577,7 @@ public:
             reinterpret_cast<const char*>(frame.payload.data()));
         iov[1].iov_len = payload_len;
 
-        auto w = co_await io::Writev(m_socket.fd(), iov, 2);
-        if (!w) {
-            throw std::system_error(w.error(), "websocket write failed");
-        }
+        co_await writev_all(iov, payload_len > 0 ? 2 : 1);
     }
 
     // ── 零拷贝写帧 ──────────────────────────────────────────────────
@@ -623,10 +620,7 @@ public:
         iov[1].iov_base = const_cast<uint8_t*>(payload);
         iov[1].iov_len = payload_len;
 
-        auto w = co_await io::Writev(m_socket.fd(), iov, 2);
-        if (!w) {
-            throw std::system_error(w.error(), "websocket write failed");
-        }
+        co_await writev_all(iov, payload_len > 0 ? 2 : 1);
     }
 
     // ── 多 segment 零拷贝写帧 ──────────────────────────────────────
@@ -671,10 +665,32 @@ public:
             iov.push_back(seg);
         }
 
-        auto w = co_await io::Writev(m_socket.fd(), iov.data(),
-                                     static_cast<int>(iov.size()));
-        if (!w) {
-            throw std::system_error(w.error(), "websocket write failed");
+        co_await writev_all(iov.data(), static_cast<int>(iov.size()));
+    }
+
+    // 短写重试：writev 可能只发出一部分，按已发送字节推进 iovec。
+    Task<void> writev_all(iovec* iov, int niov) {
+        std::vector<iovec> pending(iov, iov + niov);
+        while (!pending.empty()) {
+            auto w = co_await io::Writev(m_socket.fd(), pending.data(),
+                                         static_cast<int>(pending.size()));
+            if (!w || *w == 0) {
+                int err = w ? EIO : w.error().value();
+                throw std::system_error(err, std::generic_category(),
+                                        "websocket write failed");
+            }
+            size_t left = *w;
+            while (left > 0 && !pending.empty()) {
+                if (left >= pending.front().iov_len) {
+                    left -= pending.front().iov_len;
+                    pending.erase(pending.begin());
+                } else {
+                    auto* base = static_cast<char*>(pending.front().iov_base);
+                    pending.front().iov_base = base + left;
+                    pending.front().iov_len -= left;
+                    left = 0;
+                }
+            }
         }
     }
 
@@ -826,7 +842,7 @@ public:
                     {
                         co_await write_frame(WebSocketFrame::close());
                         m_closed = true;
-                        bg->return_buffer(chunk.buffer_id());
+                        bg->return_buffer(chunk.buffer_id(), 0);
                         bg->advance_ring(1);
                         co_return false;
                     }
@@ -836,7 +852,7 @@ public:
                                                  payload, info.payload_len);
                     }
 
-                    bg->return_buffer(chunk.buffer_id());
+                    bg->return_buffer(chunk.buffer_id(), 0);
                     bg->advance_ring(1);
                     co_return true;
                 }
@@ -871,8 +887,15 @@ public:
                     auto next_chunk = co_await assembler.next_chunk();
                     if (next_chunk.is_eof() || next_chunk.is_error())
                     {
-                        for (unsigned bid : bids) { bg->return_buffer(bid); }
-                        if (!bids.empty()) { bg->advance_ring(static_cast<int>(bids.size())); }
+                        // 批量归还：buf_offset 依次为 0,1,2,...
+                        for (size_t i = 0; i < bids.size(); ++i)
+                        {
+                            bg->return_buffer(bids[i], static_cast<int>(i));
+                        }
+                        if (!bids.empty())
+                        {
+                            bg->advance_ring(static_cast<int>(bids.size()));
+                        }
                         co_return false;
                     }
                     bids.push_back(next_chunk.buffer_id());
@@ -932,8 +955,15 @@ public:
                 {
                     co_await write_frame(WebSocketFrame::close());
                     m_closed = true;
-                    for (unsigned bid : bids) { bg->return_buffer(bid); }
-                    if (!bids.empty()) { bg->advance_ring(static_cast<int>(bids.size())); }
+                    // 批量归还：buf_offset 依次为 0,1,2,...
+                    for (size_t i = 0; i < bids.size(); ++i)
+                    {
+                        bg->return_buffer(bids[i], static_cast<int>(i));
+                    }
+                    if (!bids.empty())
+                    {
+                        bg->advance_ring(static_cast<int>(bids.size()));
+                    }
                     co_return false;
                 }
                 else
@@ -942,9 +972,15 @@ public:
                                                    iovs, info.payload_len);
                 }
 
-                // 归还所有 buffer
-                for (unsigned bid : bids) { bg->return_buffer(bid); }
-                if (!bids.empty()) { bg->advance_ring(static_cast<int>(bids.size())); }
+                // 归还所有 buffer：buf_offset 依次为 0,1,2,...
+                for (size_t i = 0; i < bids.size(); ++i)
+                {
+                    bg->return_buffer(bids[i], static_cast<int>(i));
+                }
+                if (!bids.empty())
+                {
+                    bg->advance_ring(static_cast<int>(bids.size()));
+                }
                 co_return true;
             }
         }

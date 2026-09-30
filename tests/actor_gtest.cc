@@ -198,6 +198,11 @@ TEST(SpawnTest, NonIntrusivePlainClass) {
     auto ref = sys.spawn<PlainCounter>("counter");
     EXPECT_TRUE(ref.is_valid());
     EXPECT_EQ(ref.name(), "counter");
+    ASSERT_NE(ref.get(), nullptr);
+    ref.get()->val = 7;
+    EXPECT_EQ(ref.get()->val, 7);
+    ref.get()->inc();
+    EXPECT_EQ(ref.get()->val, 8);
 }
 
 TEST(SpawnTest, ActorAdapter) {
@@ -292,7 +297,7 @@ TEST(MailboxTest, PushPop) {
     EXPECT_EQ(popped->msg_type, actor_type_hash<int_msg>());
 
     int_msg recovered;
-    std::memcpy(&recovered, popped->data.data(), sizeof(int_msg));
+    std::memcpy(&recovered, popped->bytes(), sizeof(int_msg));
     EXPECT_EQ(recovered.value, 42);
     EXPECT_TRUE(mb.empty());
 }
@@ -458,6 +463,26 @@ TEST(TrySendTest, ReturnsFalseUnderBackpressure) {
     SUCCEED();
 }
 
+// 验证 try_send 接受的消息最终都会被投递（修复 m_pending 未递增导致丢失）。
+TEST(TrySendTest, DeliversAllAcceptedMessages) {
+    actor_system sys;
+    auto ref = sys.spawn<CountingActor>("try-send-deliver");
+    ASSERT_TRUE(ref.is_valid());
+
+    constexpr int kN = 200;
+    int accepted = 0;
+    for (int i = 0; i < kN; ++i) {
+        if (ref.try_send(int_msg{i})) {
+            ++accepted;
+        }
+    }
+    EXPECT_GT(accepted, 0);
+
+    auto* actor = get_actor(ref);
+    ASSERT_TRUE(wait_for_count(actor->received, accepted, 5000));
+    EXPECT_EQ(actor->received.load(), accepted);
+}
+
 TEST(TrySendTest, InvalidRefReturnsFalse) {
     actor_ref<CountingActor> empty;
     EXPECT_FALSE(empty.try_send(int_msg{1}));
@@ -495,10 +520,63 @@ TEST(HandlerTest, MessageEnvelopeMake) {
     int_msg m{42};
     auto env = message_envelope::make(m);
     EXPECT_EQ(env.msg_type, actor_type_hash<int_msg>());
-    EXPECT_EQ(env.data.size(), sizeof(int_msg));
+    EXPECT_EQ(env.size(), sizeof(int_msg));
     int_msg recovered;
-    std::memcpy(&recovered, env.data.data(), sizeof(int_msg));
+    std::memcpy(&recovered, env.bytes(), sizeof(int_msg));
     EXPECT_EQ(recovered.value, 42);
+}
+
+struct tiny_msg {
+    static constexpr const char* actor_type = "tiny_msg";
+    uint64_t a = 0;
+    uint64_t b = 0;
+};
+
+struct wide_msg {
+    static constexpr const char* actor_type = "wide_msg";
+    unsigned char bytes[64] = {};
+};
+
+TEST(HandlerTest, TinyEnvelopeStaysInline) {
+    static_assert(sizeof(tiny_msg) <= message_envelope::k_inline_capacity);
+    tiny_msg m{7, 9};
+    auto env = message_envelope::make(m);
+    EXPECT_FALSE(env.uses_heap());
+    EXPECT_EQ(env.size(), sizeof(tiny_msg));
+    tiny_msg recovered{};
+    std::memcpy(&recovered, env.bytes(), sizeof(tiny_msg));
+    EXPECT_EQ(recovered.a, 7u);
+    EXPECT_EQ(recovered.b, 9u);
+}
+
+TEST(HandlerTest, WideEnvelopeUsesHeap) {
+    static_assert(sizeof(wide_msg) > message_envelope::k_inline_capacity);
+    wide_msg m{};
+    m.bytes[0] = 0x11;
+    m.bytes[63] = 0x22;
+    auto env = message_envelope::make(m);
+    EXPECT_TRUE(env.uses_heap());
+    EXPECT_EQ(env.size(), sizeof(wide_msg));
+    EXPECT_EQ(env.bytes()[0], 0x11);
+    EXPECT_EQ(env.bytes()[63], 0x22);
+}
+
+TEST(HandlerTest, HeapThenSmallMoveAssignClearsHeap) {
+    std::vector<uint8_t> wide(64, 0xAB);
+    message_envelope src;
+    src.assign_vector(std::move(wide));
+    uint8_t small[16];
+    for (int i = 0; i < 16; ++i) {
+        small[i] = static_cast<uint8_t>(i);
+    }
+    src.assign_bytes(small, 16);
+    message_envelope dst;
+    dst = std::move(src);
+    EXPECT_FALSE(dst.uses_heap());
+    EXPECT_EQ(dst.size(), 16u);
+    EXPECT_EQ(dst.bytes()[0], 0);
+    EXPECT_EQ(dst.bytes()[15], 15);
+    EXPECT_EQ(src.size(), 0u);
 }
 
 // ═══════════════════════════════════════════════════════════════════════

@@ -6,6 +6,7 @@
 #include <queue>
 #include <optional>
 #include <atomic>
+#include <coroutine>
 
 namespace ynet::async {
 
@@ -53,44 +54,81 @@ class Channel {
             : m_channel(ch), m_value(std::move(value)) {}
 
         bool await_ready() noexcept {
-            Guard lock(m_channel->m_lock);
-            if (m_channel->m_closed) {
-                m_closed = true;
-                return true;
+            std::coroutine_handle<> to_wake{};
+            bool ready = false;
+            {
+                Guard lock(m_channel->m_lock);
+                if (m_channel->m_closed) {
+                    m_closed = true;
+                    return true;
+                }
+                // 可用写空间需扣除已预留给被唤醒写者的槽位
+                if (m_channel->m_count + m_channel->m_write_reserved < Capacity) {
+                    m_channel->do_write_nolock(std::move(m_value));
+                    to_wake = m_channel->wake_one_reader_nolock();
+                    ready = true;
+                } else {
+                    m_would_block = true;
+                    ready = false;
+                }
             }
-            if (m_channel->m_count < Capacity) {
-                m_channel->do_write_nolock(std::move(m_value));
-                m_channel->wake_one_reader_nolock();
-                return true;
+            // SpinLock 不可重入：必须在持锁外 schedule，避免内联 resume 再次加锁死锁
+            if (to_wake) {
+                Channel::schedule(to_wake);
             }
-            m_would_block = true;
-            return false;
+            return ready;
         }
 
         void await_suspend(std::coroutine_handle<> h) noexcept {
-            Guard lock(m_channel->m_lock);
-            if (m_channel->m_closed) {
-                m_closed = true;
-                m_would_block = false;
-                h.resume();
-                return;
+            std::coroutine_handle<> to_wake{};
+            bool resume_self = false;
+            {
+                Guard lock(m_channel->m_lock);
+                if (m_channel->m_closed) {
+                    m_closed = true;
+                    m_would_block = false;
+                    resume_self = true;
+                } else if (m_channel->m_count + m_channel->m_write_reserved < Capacity) {
+                    m_channel->do_write_nolock(std::move(m_value));
+                    to_wake = m_channel->wake_one_reader_nolock();
+                    // 已在锁内写完：清 m_would_block，避免 await_resume 再次加锁
+                    m_would_block = false;
+                    resume_self = true;
+                } else {
+                    m_channel->m_writers.push(h);
+                }
             }
-            if (m_channel->m_count < Capacity) {
-                m_channel->do_write_nolock(std::move(m_value));
-                m_channel->wake_one_reader_nolock();
-                m_would_block = false;
-                h.resume();
-                return;
+            if (to_wake) {
+                Channel::schedule(to_wake);
             }
-            m_channel->m_writers.push(h);
+            if (resume_self) {
+                h.resume();
+            }
         }
 
         bool await_resume() const noexcept {
-            if (m_closed) return false;
+            if (m_closed) {
+                return false;
+            }
             if (m_would_block) {
-                Guard lock(m_channel->m_lock);
-                m_channel->do_write_nolock(std::move(m_value));
-                m_channel->wake_one_reader_nolock();
+                std::coroutine_handle<> to_wake{};
+                bool ok = true;
+                {
+                    Guard lock(m_channel->m_lock);
+                    // 被唤醒的写者持有一条写预留；关闭时释放预留且不写入
+                    if (m_channel->m_closed) {
+                        --m_channel->m_write_reserved;
+                        ok = false;
+                    } else {
+                        m_channel->do_write_nolock(std::move(m_value));
+                        --m_channel->m_write_reserved;
+                        to_wake = m_channel->wake_one_reader_nolock();
+                    }
+                }
+                if (to_wake) {
+                    Channel::schedule(to_wake);
+                }
+                return ok;
             }
             return true;
         }
@@ -107,46 +145,75 @@ class Channel {
         explicit ReadAwaitable(Channel* ch) noexcept : m_channel(ch) {}
 
         bool await_ready() noexcept {
-            Guard lock(m_channel->m_lock);
-            if (m_channel->m_count > 0) {
-                m_value = m_channel->do_read_nolock();
-                m_channel->wake_one_writer_nolock();
-                return true;
+            std::coroutine_handle<> to_wake{};
+            bool ready = false;
+            {
+                Guard lock(m_channel->m_lock);
+                // 仅消费未被读预留占用的元素，避免偷走已唤醒读者的数据
+                if (m_channel->m_count > m_channel->m_read_reserved) {
+                    m_value = m_channel->do_read_nolock();
+                    to_wake = m_channel->wake_one_writer_nolock();
+                    ready = true;
+                } else if (m_channel->m_closed) {
+                    m_closed = true;
+                    ready = true;
+                }
             }
-            if (m_channel->m_closed) {
-                m_closed = true;
-                return true;
+            if (to_wake) {
+                Channel::schedule(to_wake);
             }
-            return false;
+            return ready;
         }
 
         void await_suspend(std::coroutine_handle<> h) noexcept {
-            Guard lock(m_channel->m_lock);
-            if (m_channel->m_count > 0) {
-                m_value = m_channel->do_read_nolock();
-                m_channel->wake_one_writer_nolock();
-                h.resume();
-                return;
+            std::coroutine_handle<> to_wake{};
+            bool resume_self = false;
+            {
+                Guard lock(m_channel->m_lock);
+                if (m_channel->m_count > m_channel->m_read_reserved) {
+                    m_value = m_channel->do_read_nolock();
+                    to_wake = m_channel->wake_one_writer_nolock();
+                    resume_self = true;
+                } else if (m_channel->m_closed) {
+                    m_closed = true;
+                    resume_self = true;
+                } else {
+                    m_channel->m_readers.push(h);
+                }
             }
-            if (m_channel->m_closed) {
-                m_closed = true;
-                h.resume();
-                return;
+            if (to_wake) {
+                Channel::schedule(to_wake);
             }
-            m_channel->m_readers.push(h);
+            if (resume_self) {
+                h.resume();
+            }
         }
 
         std::optional<T> await_resume() const noexcept {
-            if (m_closed) return std::nullopt;
+            if (m_closed) {
+                return std::nullopt;
+            }
             if (!m_value.has_value()) {
-                Guard lock(m_channel->m_lock);
-                if (m_channel->m_count == 0 && m_channel->m_closed) {
-                    m_closed = true;
-                    return std::nullopt;
+                std::coroutine_handle<> to_wake{};
+                {
+                    Guard lock(m_channel->m_lock);
+                    if (m_channel->m_count > 0) {
+                        // 本读者持有一条读预留，消费后释放
+                        m_value = m_channel->do_read_nolock();
+                        --m_channel->m_read_reserved;
+                        to_wake = m_channel->wake_one_writer_nolock();
+                    } else if (m_channel->m_closed) {
+                        // close 唤醒的空读：释放预留，报告 EOF
+                        --m_channel->m_read_reserved;
+                        m_closed = true;
+                    }
+                    // 非关闭且无数据：预留不变量应保证元素已在；不把存活 channel 当作 EOF
                 }
-                if (m_channel->m_count > 0) {
-                    m_value = m_channel->do_read_nolock();
-                    m_channel->wake_one_writer_nolock();
+                if (to_wake) {
+                    Channel::schedule(to_wake);
+                }
+                if (m_closed) {
+                    return std::nullopt;
                 }
             }
             return std::move(m_value);
@@ -171,10 +238,18 @@ public:
     }
 
     bool try_write(T value) noexcept {
-        Guard lock(m_lock);
-        if (m_closed || m_count >= Capacity) return false;
-        do_write_nolock(std::move(value));
-        wake_one_reader_nolock();
+        std::coroutine_handle<> to_wake{};
+        {
+            Guard lock(m_lock);
+            if (m_closed || m_count + m_write_reserved >= Capacity) {
+                return false;
+            }
+            do_write_nolock(std::move(value));
+            to_wake = wake_one_reader_nolock();
+        }
+        if (to_wake) {
+            schedule(to_wake);
+        }
         return true;
     }
 
@@ -183,25 +258,41 @@ public:
     }
 
     std::optional<T> try_read() noexcept {
-        Guard lock(m_lock);
-        if (m_count == 0) return std::nullopt;
-        auto val = do_read_nolock();
-        wake_one_writer_nolock();
+        std::coroutine_handle<> to_wake{};
+        std::optional<T> val;
+        {
+            Guard lock(m_lock);
+            if (m_count <= m_read_reserved) {
+                return std::nullopt;
+            }
+            val = do_read_nolock();
+            to_wake = wake_one_writer_nolock();
+        }
+        if (to_wake) {
+            schedule(to_wake);
+        }
         return val;
     }
 
     void close() noexcept {
-        Guard lock(m_lock);
-        m_closed = true;
-        while (!m_readers.empty()) {
-            auto h = m_readers.front();
-            m_readers.pop();
-            schedule(h);
+        std::queue<std::coroutine_handle<>> readers;
+        std::queue<std::coroutine_handle<>> writers;
+        {
+            Guard lock(m_lock);
+            m_closed = true;
+            readers.swap(m_readers);
+            writers.swap(m_writers);
+            // 与 wake_one_* 一致：被唤醒的等待者各持有一条预留，resume 时释放
+            m_read_reserved += readers.size();
+            m_write_reserved += writers.size();
         }
-        while (!m_writers.empty()) {
-            auto h = m_writers.front();
-            m_writers.pop();
-            schedule(h);
+        while (!readers.empty()) {
+            schedule(readers.front());
+            readers.pop();
+        }
+        while (!writers.empty()) {
+            schedule(writers.front());
+            writers.pop();
         }
     }
 
@@ -222,7 +313,7 @@ public:
 
     bool full() const noexcept {
         Guard lock(m_lock);
-        return m_count >= Capacity;
+        return m_count + m_write_reserved >= Capacity;
     }
 
     size_t capacity() const noexcept { return Capacity; }
@@ -230,31 +321,41 @@ public:
 private:
     void do_write_nolock(T value) noexcept {
         m_buffer[m_write_pos] = std::move(value);
-        if (++m_write_pos >= Capacity) m_write_pos = 0;
+        if (++m_write_pos >= Capacity) {
+            m_write_pos = 0;
+        }
         ++m_count;
     }
 
     T do_read_nolock() noexcept {
         T val = std::move(m_buffer[m_read_pos]);
-        if (++m_read_pos >= Capacity) m_read_pos = 0;
+        if (++m_read_pos >= Capacity) {
+            m_read_pos = 0;
+        }
         --m_count;
         return val;
     }
 
-    void wake_one_reader_nolock() {
+    // 预留一条读槽并弹出读者句柄；调用方必须先解锁再 schedule
+    std::coroutine_handle<> wake_one_reader_nolock() {
         if (!m_readers.empty()) {
+            ++m_read_reserved;
             auto h = m_readers.front();
             m_readers.pop();
-            schedule(h);
+            return h;
         }
+        return {};
     }
 
-    void wake_one_writer_nolock() {
+    // 预留一条写槽并弹出写者句柄；调用方必须先解锁再 schedule
+    std::coroutine_handle<> wake_one_writer_nolock() {
         if (!m_writers.empty()) {
+            ++m_write_reserved;
             auto h = m_writers.front();
             m_writers.pop();
-            schedule(h);
+            return h;
         }
+        return {};
     }
 
     static void schedule(std::coroutine_handle<> h) {
@@ -270,6 +371,8 @@ private:
     size_t m_write_pos{0};
     size_t m_read_pos{0};
     size_t m_count{0};
+    size_t m_write_reserved{0};
+    size_t m_read_reserved{0};
     bool m_closed{false};
 
     std::queue<std::coroutine_handle<>> m_readers;

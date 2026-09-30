@@ -2,6 +2,9 @@
 #include <thread>
 #include <vector>
 #include <atomic>
+#include <future>
+#include <chrono>
+#include <memory>
 #include "ultranet/coroutine/mpsc_queue.hpp"
 
 // MPSC Queue comprehensive tests.
@@ -137,6 +140,75 @@ void test_multi_producer_threads() {
     PASS();
 }
 
+void test_multi_producer_with_consumer() {
+    T("multi-producer with concurrent consumer");
+    constexpr int kProducers = 4;
+    constexpr int kPerProducer = 20000;
+    constexpr int kTotal = kProducers * kPerProducer;
+    MpscQueue<int, 256> q;
+    std::atomic<int> total_popped{0};
+    std::atomic<int> producers_done{0};
+
+    auto run = [&]() {
+        std::vector<std::thread> producers;
+        producers.reserve(kProducers);
+        for (int pid = 0; pid < kProducers; ++pid) {
+            producers.emplace_back([&, pid] {
+                for (int i = 0; i < kPerProducer; ++i) {
+                    const int value = pid * 100000 + i;
+                    while (!q.try_push(value)) {
+                        std::this_thread::yield();
+                    }
+                }
+                producers_done.fetch_add(1, std::memory_order_release);
+            });
+        }
+
+        std::thread consumer([&] {
+            while (total_popped.load(std::memory_order_relaxed) < kTotal) {
+                if (auto v = q.try_pop()) {
+                    ++total_popped;
+                } else {
+                    std::this_thread::yield();
+                }
+            }
+        });
+
+        for (auto& t : producers) {
+            t.join();
+        }
+        consumer.join();
+    };
+
+    // 3 秒超时：livelock 时 try_push 永不返回，future 无法完成。
+    auto fut = std::async(std::launch::async, run);
+    if (fut.wait_for(std::chrono::seconds(3)) != std::future_status::ready) {
+        FAIL("livelock: multi-producer try_push did not complete within 3s");
+        return;
+    }
+    fut.get();
+    CHECK(total_popped.load() == kTotal, "all messages received");
+    CHECK(producers_done.load() == kProducers, "all producers finished");
+    PASS();
+}
+
+void test_failed_push_keeps_source() {
+    T("failed push keeps unique_ptr");
+    MpscQueue<std::unique_ptr<int>, 2> q;
+    auto a = std::make_unique<int>(1);
+    auto b = std::make_unique<int>(2);
+    auto c = std::make_unique<int>(3);
+    CHECK(q.try_push(a), "first");
+    CHECK(a == nullptr, "moved on success");
+    CHECK(q.try_push(b), "second");
+    CHECK(!q.try_push(c), "full");
+    CHECK(c != nullptr, "kept on failure");
+    CHECK(*c == 3, "value intact");
+    auto p1 = q.try_pop();
+    CHECK(p1.has_value() && *p1 && **p1 == 1, "pop first");
+    PASS();
+}
+
 void test_empty() {
     T("empty queue operations");
     MpscQueue<int, 64> q;
@@ -157,7 +229,10 @@ int main() {
     test_move_only();
     test_single_producer_thread();
     test_multi_producer_threads();
+    test_multi_producer_with_consumer();
+    test_failed_push_keeps_source();
     test_empty();
+
     std::cout << "\n" << g_passed << " passed, " << g_failed << " failed" << std::endl;
     return g_failed > 0 ? 1 : 0;
 }

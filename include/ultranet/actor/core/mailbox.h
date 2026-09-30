@@ -4,6 +4,7 @@
 #pragma once
 
 #include <cstdint>
+#include <cstddef>
 #include <cstring>
 #include <vector>
 #include <optional>
@@ -20,20 +21,102 @@ using ynet::async::scheduling::MpscQueue;
 // 携带序列化的消息负载及其类型哈希。始终拥有自己的存储（数据在构造时拷贝）。
 
 struct message_envelope {
-    uint64_t             msg_type = 0;
-    std::vector<uint8_t> data;
+    static constexpr size_t k_inline_capacity = 32;
 
-    // 从消息实例构造信封。
-    // serializable 类型调用 serialize()，否则 memcpy。
+    uint64_t msg_type = 0;
+    uint32_t m_size = 0;
+    alignas(std::max_align_t) uint8_t m_inline[k_inline_capacity] = {};
+    std::vector<uint8_t> m_heap;
+
+    message_envelope() = default;
+
+    message_envelope(const message_envelope& other)
+        : msg_type(other.msg_type)
+        , m_size(other.m_size)
+        , m_heap(other.m_heap) {
+        std::memcpy(m_inline, other.m_inline, k_inline_capacity);
+    }
+
+    message_envelope& operator=(const message_envelope& other) {
+        if (this != &other) {
+            msg_type = other.msg_type;
+            m_size = other.m_size;
+            m_heap = other.m_heap;
+            std::memcpy(m_inline, other.m_inline, k_inline_capacity);
+        }
+        return *this;
+    }
+
+    message_envelope(message_envelope&& other) noexcept
+        : msg_type(other.msg_type)
+        , m_size(other.m_size)
+        , m_heap(std::move(other.m_heap)) {
+        std::memcpy(m_inline, other.m_inline, k_inline_capacity);
+        other.msg_type = 0;
+        other.m_size = 0;
+    }
+
+    message_envelope& operator=(message_envelope&& other) noexcept {
+        if (this != &other) {
+            msg_type = other.msg_type;
+            m_size = other.m_size;
+            m_heap = std::move(other.m_heap);
+            std::memcpy(m_inline, other.m_inline, k_inline_capacity);
+            other.msg_type = 0;
+            other.m_size = 0;
+        }
+        return *this;
+    }
+
+    ~message_envelope() = default;
+
+    const uint8_t* bytes() const {
+        if (m_size <= k_inline_capacity) {
+            return m_inline;
+        }
+        return m_heap.data();
+    }
+
+    uint8_t* bytes() {
+        if (m_size <= k_inline_capacity) {
+            return m_inline;
+        }
+        return m_heap.data();
+    }
+
+    size_t size() const { return m_size; }
+
+    bool uses_heap() const { return m_size > k_inline_capacity; }
+
+    void assign_bytes(const uint8_t* src, size_t n) {
+        m_size = static_cast<uint32_t>(n);
+        if (n <= k_inline_capacity) {
+            m_heap.clear();
+            if (n > 0) {
+                std::memcpy(m_inline, src, n);
+            }
+        } else {
+            m_heap.assign(src, src + n);
+        }
+    }
+
+    void assign_vector(std::vector<uint8_t> v) {
+        if (v.size() <= k_inline_capacity) {
+            assign_bytes(v.data(), v.size());
+        } else {
+            m_size = static_cast<uint32_t>(v.size());
+            m_heap = std::move(v);
+        }
+    }
+
     template <typename Msg>
     static message_envelope make(const Msg& msg) {
         message_envelope env;
         env.msg_type = actor_type_hash<Msg>();
         if constexpr (serializable_msg<Msg>) {
-            env.data = msg.serialize();
+            env.assign_vector(msg.serialize());
         } else {
-            env.data.resize(sizeof(Msg));
-            std::memcpy(env.data.data(), &msg, sizeof(Msg));
+            env.assign_bytes(reinterpret_cast<const uint8_t*>(&msg), sizeof(Msg));
         }
         return env;
     }
@@ -50,9 +133,13 @@ public:
 
     mailbox() = default;
 
-    // 推入一条消息。队列满时返回 false（触发背压）。
-    bool try_push(message_envelope env) {
-        return m_queue.try_push(std::move(env));
+    // 推入一条消息。成功时移走 env，失败时 env 保持完整。
+    bool try_push(message_envelope& env) {
+        return m_queue.try_push(env);
+    }
+
+    bool try_push(message_envelope&& env) {
+        return try_push(static_cast<message_envelope&>(env));
     }
 
     // 弹出一条消息。队列空时返回 nullopt。
