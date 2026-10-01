@@ -8,7 +8,7 @@
 - **C++20 协程 API** — `co_await` 原生网络操作，直观的异步编程模型
 - **WebSocket** — 开箱即用服务器，帧编解码，零拷贝 echo，benchmark 追平 uWebSockets
 - **HTTP** — 开箱即用服务器，keep-alive，wrk 压测 220k req/s, P50=29μs
-- **Actor 框架** — CRTP actor，位置透明（本地/远端统一接口），gossip 集群发现
+- **Actor 框架** — CRTP actor，本地 mailbox 调度；两端进程都活着时远端是至少一次。可选发送/接收日志。gossip 发现
 - **Header-only** — `#include "ultranet/ultranet.h"` 即用，无额外编译
 - **工作窃取线程池** — MPSC 队列 + 全量排空调度，P99 尾部延迟可控
 
@@ -55,6 +55,8 @@ int main() {
 
 ```cpp
 #include "ultranet/actor.hpp"
+#include <chrono>
+#include <thread>
 using namespace ynet::actor;
 
 struct ping { int id; char text[32] = {}; };
@@ -69,7 +71,9 @@ int main() {
     actor_system sys({.num_threads = 4});
     auto ref = sys.spawn<Pinger>("pinger-1");
     ref.send(ping{42, "hello"});
-    sys.run();
+    while (ref->received < 1) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
 }
 ```
 
@@ -97,7 +101,7 @@ Task<void> echo(int fd) {
 mkdir build && cd build
 cmake .. -DCMAKE_BUILD_TYPE=Release
 cmake --build . -j$(nproc)
-./bin/actor_gtest        # 单元测试 (152 tests)
+./bin/actor_gtest        # Actor 单元测试（2026-10-01：141，ASAN detect_leaks=1）
 ```
 
 依赖：liburing >= 2.5, GCC >= 13 (C++20 coroutines)
@@ -121,13 +125,15 @@ cmake --build . -j$(nproc)
 | 4连接吞吐 | 131k msg/s | 70k msg/s |
 | 64KB P50 | 22μs | 19μs |
 
-### Actor 框架
+### Actor 框架（2026-10-01，本机 i5-8350U，4 个调度线程，10 万条 16 字节，1 次预热 + 12 次，中位取升序下标 6）
 
-| 指标 | 数值 |
-|------|------|
-| 单 Actor 吞吐 | 237K msg/s |
-| P50 延迟 | 1 μs |
-| 60s 持久化 | 795 万消息零丢失 |
+| 路径 | 中位 | 说明 |
+|------|------|------|
+| 本地 `send` 灌入 | 1184 万条/秒 | 最慢 1122 万，最快 1741 万。不走 TCP |
+| 同日较早一次对 CAF | 1370 万对 135 万 | ping-pong 中位 329 万对 21 万。合并写之后没有重跑 CAF |
+| 两个容器互发 1 万条 | 20023 条/秒 | 三次 16782、26572、20023。同一内核上的两个网络命名空间，`seccomp=unconfined` |
+
+本地灌入的条/秒不要写成网络吞吐。两端都活着时远端是至少一次。接收日志默认关闭；打开后，进程被 `SIGKILL` 会把已 `fsync` 的数据记录再执行一次，不是恰好一次，也不恢复 actor 字段。两台物理机未测。详见 [actor-guide.md](docs/actor-guide.md)。
 
 ## 目录结构
 
@@ -151,7 +157,8 @@ include/ultranet/
 tests/
 ├── native_ws_bench.c           # 原生 C WebSocket 压测 (第三方公平对比)
 ├── http_stress.c               # 原生 C HTTP 压测 (wrk 级)
-├── actor_gtest.cc              # Actor 单元测试 (120 tests)
+├── actor_gtest.cc              # Actor 单元测试（2026-10-01：141）
+├── actor_dist_runtime_test.cc  # 两进程远端、断连、日志、容器角色
 └── ...
 ```
 

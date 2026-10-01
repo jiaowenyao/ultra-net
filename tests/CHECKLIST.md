@@ -3,10 +3,9 @@
 每次重大改动后必须通过的测试项。
 
 ## 1. 正确性验证
-- [ ] `actor_gtest` 120 测试全部通过
-- [ ] `actor_v2_test` 10/10, `actor_mailbox_test` 12/12
-- [ ] `actor_robustness_test` 8/8, `shutdown_test` 3/3
-- [ ] ASAN + LeakSanitizer 零错误
+- [ ] `actor_gtest` 在 `ASAN_OPTIONS=detect_leaks=1:halt_on_error=1` 下退出码 0，stderr 没有 `LeakSanitizer`（2026-10-01：141 通过）
+- [ ] `actor_dist_runtime_test` 同样的 ASAN 选项下退出码 0，`dist_failures=0`
+- [ ] 旧套件 `actor_v2_test`、`actor_mailbox_test`、`actor_robustness_test` 仍在 `tests/CMakeLists.txt`，不再当作当前通过线
 
 ## 2. 单连接 WS Echo（基础性能）
 - [ ] 5000 msg 零丢失、延迟 < 300μs

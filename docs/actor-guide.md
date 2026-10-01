@@ -1,8 +1,8 @@
 # Ultra-Net Actor 框架：概念详解与开发指南
 
-> 状态: v2 Phase 4 (集群+传输集成完成)
-> 测试覆盖率: 66 项测试，100% 通过（6 个测试套件）
-> 构建: `cd build && make actor_v2_test actor_message_test actor_cluster_unit_test actor_mailbox_test actor_serialization_test actor_system_integration_test`
+> 状态: 2026-10-01。本地 mailbox 调度可用。两端进程都活着时，远端是至少一次。不是恰好一次，也还没有在两台物理机上测过。
+> 测试: `actor_gtest` 141 项通过；`actor_dist_runtime_test` 退出码 0。两边都在 `ASAN_OPTIONS=detect_leaks=1:halt_on_error=1` 下跑，stderr 没有 `LeakSanitizer`。
+> 设计记录: `docs/superpowers/specs/2026-09-30-actor-distributed-runtime-design.md`、`2026-10-01-actor-remaining-gaps-design.md`、`2026-10-01-actor-contract-perf-design.md`。前两份的结果表是当时的测量，不要改写成后来的数字。
 
 ## 概述
 
@@ -20,7 +20,18 @@ Ultra-Net Actor 框架将任意 C++ 类转化为有状态的异步 Actor，所�
 
 **技术栈**: C++20 coroutine + io_uring + WorkStealingThreadPool
 
-**消息传递**: 编译期自动选择路径——trivially copyable → memcpy 零拷贝（默认）；提供 `serialize()/deserialize()` → 自定义序列化（灵活）。`static_assert` 在编译期拦截不符合要求的类型。
+**消息传递**: 编译期自动选择路径——trivially copyable → memcpy（默认）；提供 `serialize()/deserialize()` → 自定义序列化。`static_assert` 在编译期拦截不符合要求的类型。`std::string`、`std::vector` 不能直接当消息字段。
+
+**送达**:
+
+- 本地 `send` 进 mailbox 后返回。`correlation_id` 为 0，不查去重表，默认也不写磁盘。
+- 远端 `0x04` 在两端进程都活着时是至少一次。确认在处理函数返回 `ok` 或 `dead_letter` 之后发出。处理函数抛异常则释放去重项，不确认，发送方会再送。
+- `remote_log_path` 非空时，发送方把数据记录 `fsync` 成功之后，`send` 才返回 true。发送进程被 `SIGKILL` 后，重放进程把还没确认的原始帧再送出去。
+- `receiver_log_path` 默认空。空路径下，接收方已经确认并且发送方已经忘掉这帧，然后接收进程被杀死，这帧不会再来。路径非空时，数据记录按 32 条或 2ms 做一次 `fsync`，已处理记录 `fsync` 成功之后才确认。重启会把每一条已 `fsync` 的数据记录再执行一次，已处理记录不会让这次跳过。
+- 这不是恰好一次。外部副作用在接收进程每次启动时都可能再跑一遍。`save_snapshot` 仍由调用方自己写 actor 字段，运行时不会自动序列化成员。
+- 去重键是 `(sender_node_id, msg_id)`，上限 `dedup_cap`（默认 1048576）。日志关闭且表满时，淘汰 `msg_id` 最小的已完成项；没有已完成项则不执行、不确认。
+
+**2026-10-01 测量**（本机，4 个调度线程，Release `-O3`）: 本地灌入中位 1184 万条/秒。两个容器各 2 线程、1 万条，三次 16782、26572、20023 条/秒，中位 20023。容器要 `seccomp=unconfined`，`advertise_host` 填容器里能被对端访问的地址。本地数字不是网络吞吐。两台物理机未测。
 
 ---
 
@@ -48,13 +59,13 @@ Ultra-Net Actor 框架将任意 C++ 类转化为有状态的异步 Actor，所�
    - [集群和 Gossip](#27-集群和-gossip)
    - [TCP Transport](#28-tcp-transport-使用)
    
-   - [dist-bench 实际应用](#210-实际应用dist-bench-分布式训练基准测试)
+   - [两进程远端](#210-两进程远端)
 3. [架构演进 Phase 2–4](#第三部分架构演进-phase-24)
    - [Phase 2: Mailbox + 异步调度](#phase-2-mailbox--异步调度)
    - [Phase 3: 序列化 + 远程代理](#phase-3-序列化--远程代理)
    - [Phase 4: Cluster + Transport 集成](#phase-4-cluster--transport-集成)
 4. [注意事项与陷阱](#第四部分注意事项与陷阱)
-   - [当前状态](#31-当前状态v2-phase-4集群传输集成完成66-项测试-100-通过)
+   - [当前状态](#31-当前状态2026-10-01)
    - [已知陷阱](#32-已知陷阱)
    - [编码规范](#33-编码规范来自-baseskill)
    - [测试](#34-测试)
@@ -101,8 +112,8 @@ class actor_base {
     template <typename Msg>
     void register_handler(std::function<void(const Msg&)> handler);
 
-    // 投递消息：框架调用，用户不直接使用
-    virtual void deliver(uint64_t msg_type, const void* data, size_t len);
+    // 投递消息：框架调用，用户不直接使用。返回 ok / threw / dead_letter。
+    virtual deliver_result deliver(uint64_t msg_type, const void* data, size_t len);
 };
 
 // CRTP 模板类
@@ -175,8 +186,8 @@ struct actor_uri {
 ┌──────────────────┐        ┌─────────────────┐
 │   actor_ref<T>   │───────▶│  actor_proxy    │  (内部代理)
 │                  │        │                  │
-│  - m_proxy       │        │  本地: local_actor_proxy  → 直接投递到 handler
-│  - m_uri         │        │  远程: remote_actor_proxy → 序列化 → 网络发送
+│  - m_proxy       │        │  本地: local_actor_proxy  → mailbox
+│  - m_uri         │        │  远程: remote_proxy → 0x04 → 对端
 └──────────────────┘        └─────────────────┘
 ```
 
@@ -190,12 +201,12 @@ public:
     const actor_uri& uri() const;
     std::string name() const;
 
-    // 发送消息（fire-and-forget，不等待回复）
+    // 收下后返回 true。本地进入 mailbox。远端在超时内重试。
     template <typename Msg>
-    void send(const Msg& msg) {
-        uint64_t hash = actor_type_hash<Msg>();  // 编译期计算类型 hash
-        m_proxy->deliver(hash, &msg, sizeof(msg));  // 通过代理投递
-    }
+    bool send(const Msg& msg);
+
+    template <typename Reply, typename Msg>
+    std::optional<Reply> ask(const Msg& msg, std::chrono::milliseconds timeout);
 private:
     std::shared_ptr<actor_proxy> m_proxy;
     actor_uri m_uri;
@@ -375,19 +386,22 @@ struct recv_buffer {
       │  (2) 调用 m_proxy->deliver(hash, &msg, sizeof(msg))
       ▼
   local_actor_proxy::deliver()
-      │  (3) 调用 m_actor->deliver(hash, data, len)
+      │  (3) 做成 message_envelope，push_envelope()
       ▼
-  actor_base::deliver()
-      │  (4) 在 m_handlers 中查找 hash
-      │  (5) 提取 handler 并调用 handler(msg)
+  mailbox（MPSC，4096）
+      │  (4) try_activate()，同一 actor 同时只有一个 pull_and_run
       ▼
-  你的 on_ping(ping_msg& m)
-      │  (6) 你的业务逻辑执行
+  actor_base::dispatch_envelope()
+      │  (5) 本地消息直接 deliver()
+      │      远端消息先按 (sender_node_id, msg_id) 占位，再 deliver()
       ▼
-   完成 ✓
+  处理函数
+      │  (6) ok / dead_letter 之后才对远端发 0x06
+      ▼
+   完成
 ```
 
-> **注意**：当前 v2 Phase 1 实现中，消息是**立即同步投递**的（`send()` 直接调用 `deliver()`，未经过 mailbox 队列）。完整的 mailbox + 异步调度将在后续阶段实现。
+`send()` 把消息放进 mailbox 后返回，处理函数在线程池上跑。同一 actor 的消息不会并发进入处理函数。
 
 ---
 
@@ -454,8 +468,8 @@ static uint64_t type_hash() {
 #include "ultranet/actor.hpp"
 using namespace ynet::actor;
 
-// 1. 定义消息类型
-struct ping_msg { int id; std::string text; };
+// 1. 定义消息类型。要 trivially copyable，不能直接放 std::string。
+struct ping_msg { int id; char text[32] = {}; };
 
 // 2. 定义 Actor
 class ping_actor : public actor<ping_actor> {
@@ -466,7 +480,7 @@ public:
         // 注册消息处理器
         register_handler<ping_msg>([this](const ping_msg& m) {
             m_count++;
-            std::cout << "Received ping #" << m.id << ": " << m.text << std::endl;
+            (void)m;
         });
     }
 };
@@ -475,8 +489,10 @@ public:
 int main() {
     actor_system system;                                    // 创建系统
     auto ref = system.spawn<ping_actor>("pinger-1");        // 创建 Actor
-    ref.send(ping_msg{42, "hello world"});                  // 发送消息
-    system.run();                                           // 等待结束
+    ref.send(ping_msg{42, "hello"});                        // 进入 mailbox 后返回
+    while (ref->m_count < 1) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
 }
 ```
 
@@ -494,6 +510,10 @@ cfg.num_threads = 8;
 cfg.node_name = "ps-node-1";
 cfg.listen_port = 9000;
 cfg.seed_nodes = {"192.168.1.1:9000", "192.168.1.2:9000"};
+cfg.advertise_host = "192.168.1.10";   // 空则对外公布 127.0.0.1
+cfg.remote_log_path = "/tmp/sender.log";     // 空则发送路径不落盘
+cfg.receiver_log_path = "/tmp/receiver.log"; // 空则保持“确认后被杀死会丢”的窗口
+cfg.dedup_cap = 1048576;
 actor_system system(cfg);
 ```
 
@@ -528,9 +548,9 @@ auto missing = system.find<my_actor>("ultra://*/my_actor/no-such");
 
 **注意事项**：
 
-1. `find()` 需要完整的 URI 字符串（`"ultra://*/type_name/actor_name"`），其中 type_name 是 `typeid(T).name()` 的结果（与编译器相关）
-2. `find()` 当前仅支持**本地查找**——远程查找标记为 `// would search cluster` 但尚未实现
-3. 非侵入式 Actor 的返回类型是 `actor_ref<plain_class>`，但内部实际存储的是 `actor_adapter<plain_class>`
+1. `find()` 使用 `"ultra://*/type_name/actor_name"` 或带节点号的 URI。`type_name` 是 `typeid(T).name()`，和编译器绑定，不能跨编译器当稳定名字。
+2. 本地注册表没有时，会查 gossip 填进来的远端表，并创建 `remote_proxy`。对端还没公布位置时，`find` 暂时无效，需要等 gossip。
+3. 非侵入式 Actor 的返回类型是 `actor_ref<plain_class>`，内部是 `actor_adapter<plain_class>`。`ref.get()` 走 `native_object()`。
 
 ---
 
@@ -546,9 +566,9 @@ bool ok = ref.try_send(ping_msg{2, "world"});
 // 跨 actor 发送（等价于 target.send(msg)）
 src_ref.send_to(dst_ref, ping_msg{3, "hi"});
 
-// 发送到无效 ref 是安全的
+// 发送到无效 ref 立刻返回 false，不阻塞
 actor_ref<handler_actor> empty_ref;
-empty_ref.send(int_msg{42});  // 内部检查，静默忽略
+bool accepted = empty_ref.send(int_msg{42});
 ```
 
 **发送语义**：
@@ -681,39 +701,32 @@ if (conn && conn->is_valid()) {
 
 ---
 
-### 2.10 实际应用：dist-bench 分布式训练基准测试
+### 2.10 两进程远端
 
-`app/dist-bench/main.cc` 是这个框架最完整的应用示例。
+仓库里没有 `dist-bench`。两进程行为在 `tests/actor_dist_runtime_test.cc`。父进程 `fork` 后 `exec` 自己，角色包括普通收发、断连、ask、成员离开、accept 黑洞、发送方日志重放、接收方日志的两个 `SIGKILL` 点，以及 Docker 用的 `docker-recv` / `docker-send`。
 
-**Local 模式**（共享内存，无网络）：
-```bash
-./bin/dist-bench local 4 50000 200
-# workers=4, params=50000, steps=200
+容器要加 `--security-opt seccomp=unconfined`，否则 `io_uring_queue_init_params` 会 `Operation not permitted`。`advertise_host` 填这个容器里对端能连上的地址，不要依赖默认的 `127.0.0.1`。
+
+`ask` 示例：
+
+```cpp
+struct ask_q { int value = 0; };
+struct ask_a { int value = 0; };
+
+register_handler<ask_q>([this](const ask_q& q) {
+    reply(ask_a{q.value + 1});
+});
+
+auto got = ref.ask<ask_a>(ask_q{41}, std::chrono::milliseconds(1000));
 ```
 
-**TCP 模式**（单进程多协程）：
-```bash
-./bin/dist-bench tcp 4 50000 200 18001 18080
-# workers=4, params=50000, steps=200, ps_port=18001, metrics_port=18080
+监管：
+
+```cpp
+auto ref = sys.spawn_supervised<MyActor>("name", supervisor{3});
 ```
 
-**多进程模式**（真实分布式）：
-```bash
-# 终端 1: 启动 PS
-./bin/dist-bench ps 18001 4 50000 200 18080
-
-# 终端 2-5: 启动 Workers
-./bin/dist-bench worker 127.0.0.1:18001 0 200
-./bin/dist-bench worker 127.0.0.1:18001 1 200
-./bin/dist-bench worker 127.0.0.1:18001 2 200
-./bin/dist-bench worker 127.0.0.1:18001 3 200
-```
-
-**Dashboard 模式**（启动 benchmark + 指标服务）：
-```bash
-./bin/dist-bench serve 18080 2 500 20
-# 运行 benchmark，启动 metrics HTTP server，等待 Dashboard 连接
-```
+处理函数抛异常时会计入重启次数。超过 `max_restarts` 后 actor 进入关闭，不再收消息。
 
 ---
 
@@ -736,7 +749,7 @@ if (conn && conn->is_valid()) {
 1. **`serializer`** (`dist/serialization.h`)：网络字节序 (big-endian) binary 序列化器，支持 u8/u16/u32/u64/float/double/string/bytes。提供 `pack_actor_message()`/`unpack_actor_message()` 用于构建/解析传输 envelope。
 2. **Wire 格式**: `[type:1][uri_len:4][uri:var][msg_hash:8][payload_len:4][payload:var]`。第一字节区分 gossip/actor_message/actor_location。
 3. **`remote_proxy`** (`dist/remote_proxy.h`)：实现 `actor_proxy` 接口，`deliver()` 打包 envelope → 提交命名 struct 协程 (避免 GCC 13.2 coroutine lambda bug) → 通过 `outbound_conn::send()` 异步发送。继承 `enable_shared_from_this` 保证发送期间 proxy 存活。
-4. **消息类型限制**：当前使用 `memcpy` 传递消息负载，这意味着消息类型必须是 trivially copyable。`std::string`、`std::vector` 等含堆指针的类型不支持。
+4. **消息类型**：trivially copyable 走 memcpy。另外提供 `serialize()` / `deserialize()` 的类型走自定义序列化。`std::string`、`std::vector` 不能直接当字段。当前线上类型比上面的 `0x01`/`0x02`/`0x03` 多了 `0x04`/`0x05`/`0x06`，见本节后面的决策表。
 
 ### Phase 4: Cluster + Transport 集成
 
@@ -744,7 +757,7 @@ if (conn && conn->is_valid()) {
 
 1. **同步 bind + 异步 serve**：构造函数中同步调用 `bind_socket()`（C socket API），获取实际端口后创建 `tcp_transport`，再将 `serve()` 提交到 thread pool 异步执行。
 2. **`gossip_loop()`**：`actor_system` 构造时自动启动 gossip 协程。周期性从 `cluster::live_nodes()` 选随机节点，发送 gossip + actor_location 消息。
-3. **`handle_inbound_message()`**：解析 type byte 分派到 gossip/actor_message/actor_location 三种处理路径。actor_message 通过 unpack → URI resolve → local proxy → `push_envelope()` 投递给本地 actor。
+3. **`handle_inbound_message()`**：按类型字节分派。`0x04` 解出 `sender_node_id` 和 `msg_id`，确认在处理函数返回之后。`0x02` 仍是早期的 actor_message 路径。
 4. **远程 `find()`**：先查本地 registry，miss 后查 `m_remote_actors` 表（由 gossip 填充），通过 `get_or_create_remote_proxy()` 创建/缓存 `remote_proxy`。
 5. **`publish_actor_location()`**：`spawn()` 成功后自动将 actor 的 URI 注册到 `m_remote_actors`，随下次 gossip 传播到其他节点。
 
@@ -757,28 +770,33 @@ if (conn && conn->is_valid()) {
 | CAS 激活 (`m_activated`) | 保证单次调度，防止重复执行 |
 | 命名 struct 替代 lambda 用于协程 | 避免 GCC 13.2 coroutine lambda capture 损坏 |
 | 同步 bind + 异步 serve | 构造函数中确定端口，serve 在 pool 上异步运行 |
-| Wire type discriminator (0x01/0x02/0x03) | 单 TCP 连接复用 gossip + actor_msg + location |
-| `remote_proxy` 持有 `WorkStealingThreadPool*` | 避免 `actor_system` 循环依赖 |
-| Trivially copyable 限制 | memcpy 传递消息零开销，非平凡类型待 Phase 5+ 解决 |
+| Wire type discriminator | `0x01` gossip，`0x02` actor_message，`0x03` actor_location，`0x04` 带 msg_id 的远端消息，`0x05` ask 答复，`0x06` 确认 |
+| 长度前缀 | 本机序 `uint32`。负载字段走序列化器的大端 |
+| 合并写 | 同一连接的写循环把当前队列里的帧拼成一次 `Write`，每帧仍是长度加负载 |
+| 自定义序列化 | 消息提供 `serialize()` / `deserialize()` 即可，不必 trivially copyable |
 
 ---
 
 ## 第四部分：注意事项与陷阱
 
-### 3.1 当前状态：v2 Phase 4（集群+传输集成完成，66 项测试 100% 通过）
+### 3.1 当前状态（2026-10-01）
+
+本地调度和两端都活着时的至少一次送达已经有测试。接收日志能在进程被 `SIGKILL` 后把数据记录再执行一次。用户状态要自己 `save_snapshot`。两台物理机没有测。
 
 ### 3.1 功能清单
 
 | 功能 | 状态 |
 |------|------|
-| `spawn/find/send/try_send/send_to` | ✅ |
-| Mailbox 异步调度 + CAS 激活 + 背压检测 | ✅ |
-| 侵入式自定义序列化（serialize/deserialize） | ✅ |
-| Gossip 集群发现 + TCP Transport | ✅ |
-| 远端 actor 代理（remote_proxy） | ✅ |
-| Actor 优雅关闭 + 异常安全 | ✅ |
-| `call(msg)` 请求-回复 | ⏳ |
-| Supervision 监督树 | ⏳ |
+| `spawn` / `find` / `send` / `try_send` / `ask` | 已有。`send` 返回 bool |
+| Mailbox 异步调度 + CAS 激活 + 背压 | 已有。单 actor 同时只有一个 `pull_and_run` |
+| `serialize()` / `deserialize()` | 已有 |
+| Gossip + TCP，长度前缀帧 | 已有 |
+| `remote_proxy`，确认在处理函数之后 | 已有 |
+| `spawn_supervised` | 已有。超过重启次数后关闭该 actor |
+| 发送方日志 `remote_log_path` | 已有。`fsync` 后 `send` 才返回 true |
+| 接收方日志 `receiver_log_path` | 已有，默认关。重启再执行数据记录 |
+| 恰好一次、自动恢复 actor 字段 | 没有 |
+| 两台物理机上的测量 | 没有 |
 
 ---
 
@@ -825,13 +843,7 @@ auto key = actor_uri::make_local(typeid(echo_actor).name(), "finder").to_string(
 
 **3. actor_system 析构可能阻塞**
 
-```cpp
-inline actor_system::~actor_system() {
-    m_pool.reset();  // 触发 ~WorkStealingThreadPool（join 所有线程）
-}
-```
-
-如果有协程仍在运行且永远不会完成，析构函数会永久阻塞。
+析构会先让 actor 停止收消息，再 `shutdown` 监听和已接受连接，等线程池里的任务结束，然后才丢掉线程池。`serve` / `gossip` / 确认超时循环看关闭标志退出。不要在这些协程还堵在不可取消的调用上时假设析构马上返回。
 
 **4. 无协程取消机制**
 
@@ -866,41 +878,30 @@ WSL2 环境使用的 conda GCC 13.2 有已知 bug：协程 lambda 的捕获变�
 ### 3.4 测试
 
 ```bash
-# 构建
-cd build && cmake .. -DCMAKE_BUILD_TYPE=Debug \
-    -DCMAKE_CXX_COMPILER=/home/jwy/anaconda3/envs/ultranet/bin/x86_64-conda-linux-gnu-g++ \
-    -Dliburing_INCLUDE_DIR=/home/jwy/anaconda3/envs/ultranet/include \
-    -Dliburing_LIBRARY=/home/jwy/anaconda3/envs/ultranet/lib/liburing.so
-make actor_v2_test actor_message_test actor_cluster_unit_test -j4
-
-# 运行测试
-./bin/actor_v2_test       # v2 核心测试 (spawn/find/send/ref/uri)
-./bin/actor_message_test  # 消息处理器测试
-./bin/actor_cluster_unit_test  # Gossip 集群测试
-
-# 覆盖率
-cmake .. -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_FLAGS="--coverage -O0 -g"
-make actor_v2_test -j4
-./bin/actor_v2_test
-lcov --directory . --capture --gcov-tool $GCOV --output-file coverage.info
-lcov --remove coverage.info '/usr/*' '*/gcc/*' --output-file clean.info
-lcov --summary clean.info
+cmake -S . -B /tmp/ultranet-asan -DCMAKE_BUILD_TYPE=Debug \
+  -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer" \
+  -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
+cmake --build /tmp/ultranet-asan --target actor_gtest actor_dist_runtime_test -j$(nproc)
+ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 /tmp/ultranet-asan/bin/actor_gtest
+ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 /tmp/ultranet-asan/bin/actor_dist_runtime_test
 ```
+
+2026-10-01 的结果：`actor_gtest` 141 通过，4015 ms，退出码 0，stderr 为空。`actor_dist_runtime_test` 退出码 0，`dist_failures=0`，stderr 为空。不要把构建目录放在仓库里的 `build/`。
 
 ---
 
 ## 性能基准
 
-| 场景 | 配置 | 吞吐量 | P50 | 环境 |
-|------|------|--------|-----|------|
-| Actor Local | 4w×50K params | ~∞ (CPU bound) | 1.19ms | 共享内存 |
-| Actor TCP | 1w×50K params | 0.5 MB/s | 1.20ms | TCP loopback |
-| MPSC Queue | 2000 items | — | sub-μs | 单线程 |
-| HTTP Proxy | c=200, 16T | 115K QPS | 1.5ms | WSL2 2核 |
+| 场景 | 结果 | 条件 |
+|------|------|------|
+| 本地灌入 | 中位 11839924 条/秒，最慢 11220825，最快 17412502 | 2026-10-01，4 线程，10 万条 16 字节，1 次预热 + 12 次，中位是升序下标 6。不走 TCP |
+| 同日 13:13 对 CAF | 灌入中位 13702384 对 1352905；ping-pong 中位 3285690 对 208066 | 合并写之后没有重跑 CAF 和 ping-pong |
+| 容器对容器 | 16782、26572、20023 条/秒，中位 20023 | 各 2 线程，1 万条，不开日志，`seccomp=unconfined`，显式 `advertise_host`。同一内核上的两个网络命名空间 |
+
+不要把本地灌入的条/秒写成网络吞吐。两台物理机未测。
 
 ## 相关文档
 
-- [设计文档](../.claude/actor-framework-design.md) — v1 原始设计
-- [v2 设计](../.claude/actor-v2-design.md) — v2 生产级设计方案
-- [审查报告](../.claude/actor-framework-review.md) — 全面代码审查报告
-- [行业研究](../.claude/actor-industry-research.md) — ex-actor/Akka/Orleans 等框架研究
+- [分布式运行时](superpowers/specs/2026-09-30-actor-distributed-runtime-design.md) — 第 9 节是当时的测量
+- [剩余缺口](superpowers/specs/2026-10-01-actor-remaining-gaps-design.md) — 第 11 节是 13:10–13:16 的测量
+- [契约与远端性能](superpowers/specs/2026-10-01-actor-contract-perf-design.md) — 第 9 节是接收日志和合并写之后的测量

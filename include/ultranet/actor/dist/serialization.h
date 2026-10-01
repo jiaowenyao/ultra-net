@@ -21,7 +21,7 @@ enum class message_type : uint8_t {
     actor_location  = 0x03,  // actor 位置通告
     routed          = 0x04,  // 带 msg_id 的远端消息
     reply           = 0x05,  // ask 的答复
-    ack             = 0x06,  // 邮箱入队确认
+    ack             = 0x06,  // 处理函数返回 ok 或 dead_letter 之后的确认
 };
 
 // ── 二进制序列化器（网络字节序）─────────────────────────────────────────

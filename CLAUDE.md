@@ -63,7 +63,7 @@
 - 内存安全：必须通过 ASAN（`-fsanitize=address`）验证，零 use-after-free / double-free / leak
 - 框架：优先使用 GTest（`actor_gtest.cc`），旧测试逐步迁移
 - 压测标准：10M+ 消息吞吐量、5 分钟持久化、RSS 内存监控、checksum 校验
-- 性能基线：单 Actor 吞吐 >200K msg/s、P50 延迟 <20μs、无消息丢失
+- 性能基线：本地灌入中位不低于 1000 万条/秒（2026-10-01 测得 1184 万）。这是单进程 `send`，不是网络吞吐。容器对容器中位约 2 万条/秒，不要和本地灌入比成同一个指标
 
 ## 禁止事项
 
@@ -121,8 +121,12 @@
 | `coroutine/task.hpp` | Task/Promise/co_await/生命周期 |
 | `coroutine/thread_pool.hpp` | WorkStealingThreadPool + io_uring CQE |
 | `coroutine/unified_task.hpp` | 协程/回调统一任务包装 |
-| `actor/core/base_actor.h` | Actor 基类 + mailbox 调度 |
-| `actor/core/actor_ref.h` | actor_ref + local_actor_proxy |
-| `actor/system/actor_system.h` | actor_system + spawn/find/gossip |
+| `actor/core/base_actor.h` | Actor 基类 + mailbox 调度。远端消息在处理函数之后确认 |
+| `actor/core/actor_ref.h` | actor_ref + local_actor_proxy。`send` 返回 bool，`ask` 等答复 |
+| `actor/system/actor_system.h` | actor_system + spawn/find/gossip、去重、发送/接收日志 |
+| `actor/dist/remote_log.h` | 发送方 `0x04` 日志。`fsync` 成功后 `send` 才返回 true |
+| `actor/dist/receiver_log.h` | 接收方日志。组 `fsync` 之后才确认；重启再执行数据记录 |
+| `actor/net/transport.h` | 长度前缀帧。写循环把多帧拼成一次写出 |
+| `actor/core/snapshot.h` | 调用方主动 `save_snapshot`，不自动序列化 actor 字段 |
 | `net/ws_server.hpp` | 开箱即用 WebSocket 服务器 |
 | `lifecycle/shutdown.hpp` | ShutdownCoordinator |

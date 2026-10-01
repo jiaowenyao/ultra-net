@@ -14,7 +14,7 @@
 
 | 文档 | 内容 |
 |------|------|
-| [Actor 框架](actor-guide.md) | Actor 模型、消息传递、分布式部署 |
+| [Actor 框架](actor-guide.md) | 本地 mailbox、远端至少一次、可选日志、gossip |
 | [TCP 编程](tcp-guide.md) | TCP socket、echo server/client |
 | [UDP 编程](udp-guide.md) | UDP、可靠UDP |
 | [HTTP 编程](http-guide.md) | HTTP 服务端/客户端 |
