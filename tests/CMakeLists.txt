@@ -108,6 +108,12 @@ add_executable(actor_gtest actor_gtest.cc)
 target_include_directories(actor_gtest PRIVATE ${GTest_INCLUDE_DIR})
 target_link_libraries(actor_gtest PRIVATE ultranet pthread gtest gtest_main)
 
+add_executable(actor_dist_runtime_test actor_dist_runtime_test.cc)
+target_link_libraries(actor_dist_runtime_test PRIVATE ultranet pthread)
+
+add_executable(actor_snapshot_crash actor_snapshot_crash.cc)
+target_link_libraries(actor_snapshot_crash PRIVATE ultranet pthread)
+
 # Actor stress test
 add_executable(actor_stress_test actor_stress_test.cc)
 target_link_libraries(actor_stress_test PRIVATE ultranet pthread)

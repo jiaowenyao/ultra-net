@@ -10,8 +10,15 @@
 #include <chrono>
 #include <atomic>
 #include <cstring>
+#include <csignal>
+#include <filesystem>
+#include <fstream>
+#include <condition_variable>
+#include <mutex>
+#include <iostream>
 
 #include "ultranet/actor.hpp"
+#include "ultranet/actor/dist/remote_log.h"
 
 using namespace ynet::actor;
 using namespace ynet::actor::dist;
@@ -162,6 +169,21 @@ TEST(ActorSystemTest, SpecificPort) {
     cfg.node_name = "port-test";
     actor_system sys(cfg);
     EXPECT_EQ(sys.actual_port(), 19001);
+}
+
+TEST(ActorSystemTest, DefaultAdvertiseIsLoopback) {
+    system_config cfg;
+    actor_system sys(cfg);
+    EXPECT_EQ(sys.advertised_addr(),
+              "127.0.0.1:" + std::to_string(sys.actual_port()));
+}
+
+TEST(ActorSystemTest, AdvertiseHostReplacesLoopback) {
+    system_config cfg;
+    cfg.advertise_host = "10.1.2.3";
+    actor_system sys(cfg);
+    EXPECT_EQ(sys.advertised_addr(),
+              "10.1.2.3:" + std::to_string(sys.actual_port()));
 }
 
 TEST(ActorSystemTest, ScheduleFunction) {
@@ -1220,8 +1242,54 @@ TEST(OutboundConnTest, SendAndReceiveViaSocketPair) {
     EXPECT_TRUE(done.load());
 }
 
+TEST(OutboundConnTest, TwoPostedFramesStaySeparate) {
+    int sv[2];
+    ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM, 0, sv), 0);
+
+    WorkStealingThreadPool pool(1);
+    ExecutionContext::Scope scope(&pool);
+
+    auto conn = std::make_shared<outbound_conn>(TcpSocket(sv[0]));
+    std::vector<uint8_t> first = {0x11, 0x22};
+    std::vector<uint8_t> second = {0x33, 0x44, 0x55};
+    ASSERT_TRUE(conn->post_frame(first, &pool));
+    ASSERT_TRUE(conn->post_frame(std::move(second), &pool));
+
+    auto read_exact = [&](void* buf, size_t n) {
+        auto* out = static_cast<uint8_t*>(buf);
+        size_t got = 0;
+        while (got < n) {
+            ssize_t nread = ::read(sv[1], out + got, n - got);
+            if (nread <= 0) {
+                return false;
+            }
+            got += static_cast<size_t>(nread);
+        }
+        return true;
+    };
+
+    uint32_t len = 0;
+    ASSERT_TRUE(read_exact(&len, sizeof(len)));
+    EXPECT_EQ(len, 2u);
+    uint8_t buf[3] = {};
+    ASSERT_TRUE(read_exact(buf, 2));
+    EXPECT_EQ(buf[0], 0x11);
+    EXPECT_EQ(buf[1], 0x22);
+
+    len = 0;
+    ASSERT_TRUE(read_exact(&len, sizeof(len)));
+    EXPECT_EQ(len, 3u);
+    ASSERT_TRUE(read_exact(buf, 3));
+    EXPECT_EQ(buf[0], 0x33);
+    EXPECT_EQ(buf[1], 0x44);
+    EXPECT_EQ(buf[2], 0x55);
+
+    pool.wait_all();
+    ::close(sv[1]);
+}
+
 TEST(TcpTransportTest, PortConstructor) {
-    tcp_transport t(9000, [](auto) -> Task<void> { co_return; });
+    tcp_transport t(9000, [](auto, auto) -> Task<void> { co_return; });
     EXPECT_EQ(t.port(), 9000);
     EXPECT_EQ(t.actual_port(), 9000);
 }
@@ -1229,7 +1297,7 @@ TEST(TcpTransportTest, PortConstructor) {
 TEST(TcpTransportTest, PreboundConstructor) {
     int fd = ::socket(AF_INET, SOCK_STREAM, 0);
     ASSERT_GE(fd, 0);
-    tcp_transport t(fd, 8080, [](auto) -> Task<void> { co_return; });
+    tcp_transport t(fd, 8080, [](auto, auto) -> Task<void> { co_return; });
     EXPECT_EQ(t.port(), 8080);
 }
 
@@ -1238,7 +1306,7 @@ TEST(TcpTransportTest, ConnectFailureReturnsNull) {
     ExecutionContext::Scope scope(&pool);
     ShutdownCoordinator sd;
 
-    tcp_transport t(0, [](auto) -> Task<void> { co_return; });
+    tcp_transport t(0, [](auto, auto) -> Task<void> { co_return; });
 
     auto connector = [&]() -> Task<void> {
         // Connect to an unreachable port.
@@ -1260,7 +1328,7 @@ TEST(TransportIntegrationTest, ServeAndReceiveMessage) {
     std::vector<uint8_t> received_payload;
     std::atomic<bool> msg_received{false};
 
-    auto handler = [&](std::vector<uint8_t> data) -> Task<void> {
+    auto handler = [&](std::shared_ptr<inbound_conn>, std::vector<uint8_t> data) -> Task<void> {
         received_payload = std::move(data);
         msg_received.store(true);
         co_return;
@@ -1317,7 +1385,7 @@ TEST(TransportIntegrationTest, MultipleConnections) {
 
     std::atomic<int> msg_count{0};
 
-    auto handler = [&](std::vector<uint8_t>) -> Task<void> {
+    auto handler = [&](std::shared_ptr<inbound_conn>, std::vector<uint8_t>) -> Task<void> {
         msg_count.fetch_add(1);
         co_return;
     };
@@ -1791,6 +1859,354 @@ TEST(WsServerTest, AutoAssignPort) {
     WsServer server(0);
     // serve 需要在线程池上运行，简化为检查构造和端口
     EXPECT_EQ(server.port(), 0);
+}
+
+TEST(RoutedWireTest, RoundTripAndRejectEmpty) {
+    actor_uri uri = actor_uri::make_local("WireActor", "n1");
+    uint8_t payload[] = {1, 2, 3, 4};
+    auto bytes = pack_routed(uri, 0xabc, 0x01, 42, 99, payload, sizeof(payload));
+    actor_uri out_uri;
+    uint8_t flags = 0;
+    uint64_t msg_id = 0;
+    uint64_t sender_node_id = 1;
+    uint64_t msg_hash = 0;
+    std::vector<uint8_t> out_payload;
+    ASSERT_TRUE(unpack_routed(bytes.data(), bytes.size(),
+                              out_uri, flags, msg_id, sender_node_id,
+                              msg_hash, out_payload));
+    EXPECT_EQ(flags, 0x01);
+    EXPECT_EQ(msg_id, 42u);
+    EXPECT_EQ(sender_node_id, 99u);
+    EXPECT_EQ(msg_hash, 0xabcu);
+    EXPECT_EQ(out_uri.name, "n1");
+    ASSERT_EQ(out_payload.size(), 4u);
+    EXPECT_EQ(out_payload[3], 4);
+
+    auto zero_sender = pack_routed(uri, 0xabc, 0x02, 43, 0, payload, sizeof(payload));
+    ASSERT_TRUE(unpack_routed(zero_sender.data(), zero_sender.size(),
+                              out_uri, flags, msg_id, sender_node_id,
+                              msg_hash, out_payload));
+    EXPECT_EQ(sender_node_id, 0u);
+    EXPECT_EQ(msg_id, 43u);
+
+    auto empty = pack_routed(uri, 1, 0, 7, 5, payload, 0);
+    EXPECT_FALSE(unpack_routed(empty.data(), empty.size(),
+                               out_uri, flags, msg_id, sender_node_id,
+                               msg_hash, out_payload));
+}
+
+TEST(RoutedWireTest, ReplyAndAckRoundTrip) {
+    uint8_t payload[] = {9};
+    auto reply = pack_reply(99, payload, 1);
+    uint64_t msg_id = 0;
+    std::vector<uint8_t> out;
+    ASSERT_TRUE(unpack_reply(reply.data(), reply.size(), msg_id, out));
+    EXPECT_EQ(msg_id, 99u);
+    ASSERT_EQ(out.size(), 1u);
+    EXPECT_EQ(out[0], 9);
+
+    auto empty_reply = pack_reply(1, payload, 0);
+    EXPECT_FALSE(unpack_reply(empty_reply.data(), empty_reply.size(), msg_id, out));
+
+    auto ack = pack_ack(77);
+    uint64_t ack_id = 0;
+    ASSERT_TRUE(unpack_ack(ack.data(), ack.size(), ack_id));
+    EXPECT_EQ(ack_id, 77u);
+}
+
+TEST(RoutedWireTest, OldActorMessageStillUnpacks) {
+    actor_uri uri = actor_uri::make_local("WireActor", "old");
+    uint8_t payload[] = {5, 6};
+    auto bytes = pack_actor_message(uri, 1234, payload, sizeof(payload));
+    actor_uri out_uri;
+    uint64_t msg_type = 0;
+    std::vector<uint8_t> out_payload;
+    ASSERT_TRUE(unpack_actor_message(bytes.data(), bytes.size(),
+                                     out_uri, msg_type, out_payload));
+    EXPECT_EQ(msg_type, 1234u);
+    EXPECT_EQ(out_uri.name, "old");
+    ASSERT_EQ(out_payload.size(), 2u);
+}
+
+TEST(RemoteBufferTest, FullTryDeliverReturnsFalse) {
+    actor_uri uri = actor_uri::make_local("Buf", "b");
+    remote_proxy proxy(uri, nullptr, nullptr);
+    uint8_t byte = 7;
+    for (int i = 0; i < 1024; ++i) {
+        ASSERT_TRUE(proxy.try_deliver(1, &byte, 1, static_cast<uint64_t>(i + 1), 0));
+    }
+    EXPECT_FALSE(proxy.try_deliver(1, &byte, 1, 1025, 0));
+    EXPECT_EQ(proxy.buffered_count(), 1024u);
+}
+
+struct ask_q {
+    int value = 0;
+};
+struct ask_a {
+    int value = 0;
+};
+
+class ReplyActor : public actor<ReplyActor> {
+public:
+    ReplyActor() {
+        register_handler<ask_q>([this](const ask_q& q) {
+            reply(ask_a{q.value + 1});
+        });
+    }
+};
+
+class SelfAskActor : public actor<SelfAskActor> {
+public:
+    actor_ref<SelfAskActor> self;
+    std::atomic<int> entered{0};
+    std::atomic<bool> done{false};
+    std::atomic<bool> got_nullopt{false};
+
+    SelfAskActor() {
+        register_handler<int_msg>([this](const int_msg&) {
+            if (entered.fetch_add(1) > 0) {
+                return;
+            }
+            auto result = self.ask<int_msg>(int_msg{1}, std::chrono::milliseconds(200));
+            got_nullopt.store(!result.has_value());
+            done.store(true);
+        });
+    }
+};
+
+struct boom_msg {
+    int mode = 0;
+};
+
+class SupActor : public actor<SupActor> {
+public:
+    std::atomic<int> generation{0};
+    std::atomic<int> business{0};
+
+    SupActor() {
+        register_handler<boom_msg>([this](const boom_msg& m) {
+            if (m.mode == 1) {
+                throw std::runtime_error("supervised");
+            }
+            business.fetch_add(1);
+        });
+    }
+
+    void on_restart() override {
+        generation.fetch_add(1);
+    }
+};
+
+TEST(AskTest, LocalReply) {
+    actor_system sys;
+    auto ref = sys.spawn<ReplyActor>("reply");
+    ASSERT_TRUE(ref.is_valid());
+    auto got = ref.ask<ask_a>(ask_q{41}, std::chrono::milliseconds(1000));
+    ASSERT_TRUE(got.has_value());
+    EXPECT_EQ(got->value, 42);
+}
+
+TEST(AskTest, SelfAskTimesOut) {
+    actor_system sys;
+    auto ref = sys.spawn<SelfAskActor>("self");
+    ASSERT_TRUE(ref.is_valid());
+    ref.get()->self = ref;
+    alarm(3);
+    ASSERT_TRUE(ref.send(int_msg{1}));
+    auto* actor = ref.get();
+    for (int i = 0; i < 50 && !actor->done.load(); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    alarm(0);
+    ASSERT_TRUE(actor->done.load());
+    EXPECT_TRUE(actor->got_nullopt.load());
+}
+
+TEST(SupervisorTest, RestartsThenStops) {
+    actor_system sys;
+    auto ref = sys.spawn_supervised<SupActor>("sup", supervisor{3});
+    ASSERT_TRUE(ref.is_valid());
+    auto* actor = ref.get();
+    for (int i = 0; i < 3; ++i) {
+        ASSERT_TRUE(ref.send(boom_msg{1}));
+    }
+    ASSERT_TRUE(wait_for_count(actor->generation, 3));
+    ASSERT_TRUE(ref.send(boom_msg{1}));
+    for (int i = 0; i < 50 && !actor->is_shutting_down(); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    EXPECT_TRUE(actor->is_shutting_down());
+    int before = actor->business.load();
+    ref.send(boom_msg{0});
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    EXPECT_EQ(actor->business.load(), before);
+}
+
+TEST(SendResultTest, MissingRefReturnsFalse) {
+    actor_ref<ReplyActor> empty;
+    auto start = std::chrono::steady_clock::now();
+    EXPECT_FALSE(empty.send(ask_q{1}));
+    auto elapsed = std::chrono::steady_clock::now() - start;
+    EXPECT_LT(elapsed, std::chrono::milliseconds(500));
+}
+
+TEST(RemoteLogTest, IsoHdlcAndTornTail) {
+    const char* sample = "123456789";
+    EXPECT_EQ(crc32_iso_hdlc(reinterpret_cast<const uint8_t*>(sample), 9), 0xCBF43926u);
+
+    auto path = std::filesystem::path("/tmp/ultra-remote-log-gtest");
+    std::filesystem::remove(path);
+    {
+        remote_log log(path.string());
+        ASSERT_TRUE(log.append_data(7, std::vector<uint8_t>{1, 2, 3, 4}));
+        ASSERT_TRUE(log.append_data(7, std::vector<uint8_t>{1, 2, 3, 4}));
+        ASSERT_TRUE(log.append_data(8, std::vector<uint8_t>{9}));
+        ASSERT_TRUE(log.append_ack(7));
+    }
+    auto scan = scan_remote_log(path.string());
+    EXPECT_EQ(scan.complete_data, 2u);
+    EXPECT_EQ(scan.torn, 0);
+    ASSERT_EQ(scan.unacked_frames.size(), 1u);
+    EXPECT_EQ(scan.unacked_frames[0].size(), 1u);
+
+    {
+        std::ofstream extra(path, std::ios::binary | std::ios::app);
+        extra.put('x');
+    }
+    auto torn = scan_remote_log(path.string());
+    EXPECT_EQ(torn.torn, 1);
+    EXPECT_EQ(torn.complete_data, 2u);
+    EXPECT_EQ(torn.unacked_frames.size(), 1u);
+}
+
+struct cap_msg {
+    uint64_t id = 0;
+};
+
+class CapCount : public actor<CapCount> {
+public:
+    std::atomic<int> runs{0};
+    std::mutex mu;
+    std::vector<uint64_t> ids;
+
+    CapCount() {
+        register_handler<cap_msg>([this](const cap_msg& msg) {
+            {
+                std::lock_guard<std::mutex> lock(mu);
+                ids.push_back(msg.id);
+            }
+            runs.fetch_add(1);
+        });
+    }
+};
+
+class CapHold : public actor<CapHold> {
+public:
+    std::atomic<int> entered{0};
+    std::mutex mu;
+    std::condition_variable cv;
+    bool release = false;
+
+    CapHold() {
+        register_handler<cap_msg>([this](const cap_msg&) {
+            entered.fetch_add(1);
+            std::unique_lock<std::mutex> lock(mu);
+            cv.wait(lock, [this]() { return release; });
+        });
+    }
+
+    void let_go() {
+        {
+            std::lock_guard<std::mutex> lock(mu);
+            release = true;
+        }
+        cv.notify_all();
+    }
+};
+
+static void push_capped(actor_base* target, uint64_t sender, uint64_t msg_id) {
+    auto env = message_envelope::make(cap_msg{msg_id});
+    env.correlation_id = msg_id;
+    env.sender_node_id = sender;
+    target->push_envelope(std::move(env));
+}
+
+TEST(DedupCapTest, EvictsSmallestCompletedMsgId) {
+    system_config cfg;
+    cfg.dedup_cap = 2;
+    actor_system sys(cfg);
+    auto ref = sys.spawn<CapCount>("cap");
+    ASSERT_TRUE(ref.is_valid());
+    auto* actor = ref.get();
+    push_capped(actor, 9, 1);
+    push_capped(actor, 9, 2);
+    ASSERT_TRUE(wait_for_count(actor->runs, 2));
+    EXPECT_EQ(sys.peek_dedup(9, 1), actor_system::dedup_view::completed);
+    EXPECT_EQ(sys.peek_dedup(9, 2), actor_system::dedup_view::completed);
+
+    push_capped(actor, 9, 3);
+    ASSERT_TRUE(wait_for_count(actor->runs, 3));
+    EXPECT_GE(sys.dedup_evict_count(), 1u);
+    auto evict_after_third = sys.dedup_evict_count();
+    EXPECT_EQ(sys.peek_dedup(9, 1), actor_system::dedup_view::absent);
+    EXPECT_EQ(sys.peek_dedup(9, 2), actor_system::dedup_view::completed);
+    EXPECT_EQ(sys.peek_dedup(9, 3), actor_system::dedup_view::completed);
+
+    push_capped(actor, 9, 1);
+    ASSERT_TRUE(wait_for_count(actor->runs, 4));
+    std::cout << "dedup evict_after_third=" << evict_after_third
+              << " runs=" << actor->runs.load()
+              << " peek1=" << static_cast<int>(sys.peek_dedup(9, 1))
+              << " peek2=" << static_cast<int>(sys.peek_dedup(9, 2))
+              << " peek3=" << static_cast<int>(sys.peek_dedup(9, 3)) << "\n";
+    EXPECT_EQ(sys.peek_dedup(9, 1), actor_system::dedup_view::completed);
+}
+
+TEST(DedupCapTest, FullInProgressDoesNotRun) {
+    system_config cfg;
+    cfg.dedup_cap = 2;
+    cfg.num_threads = 4;
+    actor_system sys(cfg);
+    auto hold_a = sys.spawn<CapHold>("ha");
+    auto hold_b = sys.spawn<CapHold>("hb");
+    auto counter = sys.spawn<CapCount>("cc");
+    struct release_holds {
+        CapHold* a = nullptr;
+        CapHold* b = nullptr;
+        ~release_holds() {
+            if (a != nullptr) {
+                a->let_go();
+            }
+            if (b != nullptr) {
+                b->let_go();
+            }
+        }
+    } holds{hold_a.get(), hold_b.get()};
+    ASSERT_TRUE(hold_a.is_valid());
+    ASSERT_TRUE(hold_b.is_valid());
+    push_capped(hold_a.get(), 9, 1);
+    push_capped(hold_b.get(), 9, 2);
+    ASSERT_TRUE(wait_for_count(hold_a.get()->entered, 1));
+    ASSERT_TRUE(wait_for_count(hold_b.get()->entered, 1));
+    EXPECT_EQ(sys.peek_dedup(9, 1), actor_system::dedup_view::in_progress);
+    EXPECT_EQ(sys.peek_dedup(9, 2), actor_system::dedup_view::in_progress);
+
+    push_capped(counter.get(), 9, 3);
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    EXPECT_EQ(counter.get()->runs.load(), 0);
+    EXPECT_EQ(sys.dedup_overflow_count(), 1u);
+    EXPECT_EQ(sys.peek_dedup(9, 3), actor_system::dedup_view::absent);
+}
+
+TEST(ReceiverLogTest, RejectsSamePathAsSenderLog) {
+    auto path = std::filesystem::path("/tmp/ultra-receiver-log-same");
+    std::filesystem::remove(path);
+    system_config cfg;
+    cfg.remote_log_path = path.string();
+    cfg.receiver_log_path = path.string();
+    actor_system sys(cfg);
+    EXPECT_EQ(sys.receiver_log_rejected_count(), 1u);
+    EXPECT_EQ(sys.receiver_fsynced_data_count(), 0u);
 }
 
 // ═══════════════════════════════════════════════════════════════════════

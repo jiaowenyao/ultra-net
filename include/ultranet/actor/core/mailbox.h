@@ -24,6 +24,11 @@ struct message_envelope {
     static constexpr size_t k_inline_capacity = 32;
 
     uint64_t msg_type = 0;
+    // 0 表示这条消息没有 ask。本地灌入保持 0，不查表。
+    uint64_t correlation_id = 0;
+    uint64_t reply_conn_id = 0;
+    uint64_t sender_node_id = 0;
+    uint8_t flags = 0;
     uint32_t m_size = 0;
     alignas(std::max_align_t) uint8_t m_inline[k_inline_capacity] = {};
     std::vector<uint8_t> m_heap;
@@ -32,6 +37,10 @@ struct message_envelope {
 
     message_envelope(const message_envelope& other)
         : msg_type(other.msg_type)
+        , correlation_id(other.correlation_id)
+        , reply_conn_id(other.reply_conn_id)
+        , sender_node_id(other.sender_node_id)
+        , flags(other.flags)
         , m_size(other.m_size)
         , m_heap(other.m_heap) {
         std::memcpy(m_inline, other.m_inline, k_inline_capacity);
@@ -40,6 +49,10 @@ struct message_envelope {
     message_envelope& operator=(const message_envelope& other) {
         if (this != &other) {
             msg_type = other.msg_type;
+            correlation_id = other.correlation_id;
+            reply_conn_id = other.reply_conn_id;
+            sender_node_id = other.sender_node_id;
+            flags = other.flags;
             m_size = other.m_size;
             m_heap = other.m_heap;
             std::memcpy(m_inline, other.m_inline, k_inline_capacity);
@@ -49,20 +62,36 @@ struct message_envelope {
 
     message_envelope(message_envelope&& other) noexcept
         : msg_type(other.msg_type)
+        , correlation_id(other.correlation_id)
+        , reply_conn_id(other.reply_conn_id)
+        , sender_node_id(other.sender_node_id)
+        , flags(other.flags)
         , m_size(other.m_size)
         , m_heap(std::move(other.m_heap)) {
         std::memcpy(m_inline, other.m_inline, k_inline_capacity);
         other.msg_type = 0;
+        other.correlation_id = 0;
+        other.reply_conn_id = 0;
+        other.sender_node_id = 0;
+        other.flags = 0;
         other.m_size = 0;
     }
 
     message_envelope& operator=(message_envelope&& other) noexcept {
         if (this != &other) {
             msg_type = other.msg_type;
+            correlation_id = other.correlation_id;
+            reply_conn_id = other.reply_conn_id;
+            sender_node_id = other.sender_node_id;
+            flags = other.flags;
             m_size = other.m_size;
             m_heap = std::move(other.m_heap);
             std::memcpy(m_inline, other.m_inline, k_inline_capacity);
             other.msg_type = 0;
+            other.correlation_id = 0;
+            other.reply_conn_id = 0;
+            other.sender_node_id = 0;
+            other.flags = 0;
             other.m_size = 0;
         }
         return *this;

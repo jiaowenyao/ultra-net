@@ -12,6 +12,7 @@
 #include <string>
 #include <chrono>
 #include <unistd.h>
+#include <sys/socket.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <arpa/inet.h>
@@ -62,8 +63,11 @@ public:
     }
 
     // 同步关闭并清空 fd，析构不会再关一次。
+    // 先 shutdown：io_uring 的读持有 file 引用，只 close 不会让在途 read 返回，
+    // 协程会停到超时，进程退出时帧被 LeakSanitizer 记成泄漏。
     void close_fd() noexcept {
         if (m_fd >= 0) {
+            ::shutdown(m_fd, SHUT_RDWR);
             ::close(m_fd);
             m_fd = -1;
         }

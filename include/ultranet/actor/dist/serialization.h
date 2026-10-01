@@ -19,6 +19,9 @@ enum class message_type : uint8_t {
     gossip          = 0x01,  // 集群 gossip 消息
     actor_message   = 0x02,  // actor 到 actor 的消息
     actor_location  = 0x03,  // actor 位置通告
+    routed          = 0x04,  // 带 msg_id 的远端消息
+    reply           = 0x05,  // ask 的答复
+    ack             = 0x06,  // 邮箱入队确认
 };
 
 // ── 二进制序列化器（网络字节序）─────────────────────────────────────────
@@ -256,6 +259,115 @@ inline bool unpack_actor_location(const uint8_t* data, size_t len,
 
     out_uri = parse_uri_from_wire(s.read_string());
     out_ttl = s.read_u32();
+    return true;
+}
+
+// ── 带确认的远端消息（0x04 / 0x05 / 0x06）────────────────────────────────
+//
+// routed（0x04）:
+//   type:1 flags:1 msg_id:8 sender_node_id:8 uri:string msg_hash:8 payload_len:4 payload
+// reply（0x05）:
+//   type:1 msg_id:8 payload_len:4 payload
+// ack（0x06）:
+//   type:1 msg_id:8
+// payload_len == 0 对 0x04 和 0x05 拒绝。sender_node_id 允许为 0。0x02 的布局不在这里改。
+
+inline std::vector<uint8_t> pack_routed(const actor_uri& target_uri,
+                                        uint64_t msg_type_hash,
+                                        uint8_t flags,
+                                        uint64_t msg_id,
+                                        uint64_t sender_node_id,
+                                        const void* payload,
+                                        size_t payload_len) {
+    serializer s;
+    s.write_type_byte(message_type::routed);
+    s.write_u8(flags);
+    s.write_u64(msg_id);
+    s.write_u64(sender_node_id);
+    s.write_string(target_uri.to_string());
+    s.write_u64(msg_type_hash);
+    s.write_u32(static_cast<uint32_t>(payload_len));
+    if (payload_len > 0 && payload != nullptr) {
+        s.write_bytes(payload, payload_len);
+    }
+    return s.consume();
+}
+
+inline bool unpack_routed(const uint8_t* data, size_t len,
+                          actor_uri& out_uri,
+                          uint8_t& out_flags,
+                          uint64_t& out_msg_id,
+                          uint64_t& out_sender_node_id,
+                          uint64_t& out_msg_hash,
+                          std::vector<uint8_t>& out_payload) {
+    serializer s(std::vector<uint8_t>(data, data + len));
+    if (s.read_type_byte() != message_type::routed) {
+        return false;
+    }
+    out_flags = s.read_u8();
+    out_msg_id = s.read_u64();
+    out_sender_node_id = s.read_u64();
+    out_uri = parse_uri_from_wire(s.read_string());
+    out_msg_hash = s.read_u64();
+    uint32_t payload_len = s.read_u32();
+    if (payload_len == 0) {
+        return false;
+    }
+    if (s.offset() + payload_len > len) {
+        return false;
+    }
+    out_payload.assign(data + s.offset(), data + s.offset() + payload_len);
+    return true;
+}
+
+inline std::vector<uint8_t> pack_reply(uint64_t msg_id,
+                                       const void* payload,
+                                       size_t payload_len) {
+    serializer s;
+    s.write_type_byte(message_type::reply);
+    s.write_u64(msg_id);
+    s.write_u32(static_cast<uint32_t>(payload_len));
+    if (payload_len > 0 && payload != nullptr) {
+        s.write_bytes(payload, payload_len);
+    }
+    return s.consume();
+}
+
+inline bool unpack_reply(const uint8_t* data, size_t len,
+                         uint64_t& out_msg_id,
+                         std::vector<uint8_t>& out_payload) {
+    serializer s(std::vector<uint8_t>(data, data + len));
+    if (s.read_type_byte() != message_type::reply) {
+        return false;
+    }
+    out_msg_id = s.read_u64();
+    uint32_t payload_len = s.read_u32();
+    if (payload_len == 0) {
+        return false;
+    }
+    if (s.offset() + payload_len > len) {
+        return false;
+    }
+    out_payload.assign(data + s.offset(), data + s.offset() + payload_len);
+    return true;
+}
+
+inline std::vector<uint8_t> pack_ack(uint64_t msg_id) {
+    serializer s;
+    s.write_type_byte(message_type::ack);
+    s.write_u64(msg_id);
+    return s.consume();
+}
+
+inline bool unpack_ack(const uint8_t* data, size_t len, uint64_t& out_msg_id) {
+    serializer s(std::vector<uint8_t>(data, data + len));
+    if (s.read_type_byte() != message_type::ack) {
+        return false;
+    }
+    if (s.remaining() < sizeof(uint64_t)) {
+        return false;
+    }
+    out_msg_id = s.read_u64();
     return true;
 }
 

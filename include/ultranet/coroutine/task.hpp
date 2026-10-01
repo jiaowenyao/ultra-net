@@ -54,6 +54,16 @@ struct TaskPromiseBase {
         t_cached_size = size;
     }
 
+    // 线程退出前释放单槽缓存。否则最后一帧停在 thread_local 里，
+    // 线程结束后没有指针可达，LeakSanitizer 把它报成协程帧泄漏。
+    static void release_cached_frame() noexcept {
+        if (t_cached_ptr != nullptr) {
+            ::operator delete(t_cached_ptr);
+            t_cached_ptr = nullptr;
+            t_cached_size = 0;
+        }
+    }
+
     // 线程局部帧缓存（仅 operator new/delete 使用）
     static thread_local void* t_cached_ptr;
     static thread_local std::size_t t_cached_size;

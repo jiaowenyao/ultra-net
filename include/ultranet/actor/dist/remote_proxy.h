@@ -9,6 +9,9 @@
 #include <memory>
 #include <mutex>
 #include <deque>
+#include <functional>
+#include <vector>
+#include <cstdint>
 
 #include "ultranet/actor/core/actor_ref.h"
 #include "ultranet/actor/core/base_actor.h"
@@ -20,20 +23,12 @@ namespace ynet::actor::dist {
 
 using ynet::async::scheduling::WorkStealingThreadPool;
 
-// ── 单次发送上下文（避免 GCC 13.2 协程 lambda 捕获 bug）─────────────────
-
-struct send_context {
-    std::shared_ptr<net::outbound_conn> conn;
-    std::vector<uint8_t> envelope;
-};
-
-// 前向声明（实现在文件末尾，类内部 submit_send 引用）
-ynet::async::Task<void> remote_send_impl(std::shared_ptr<send_context> ctx);
-
 // ── 缓冲消息（连接就绪前暂存）─────────────────────────────────────────────
 
 struct buffered_message {
-    uint64_t msg_type;
+    uint64_t msg_type = 0;
+    uint64_t msg_id = 0;
+    uint8_t flags = 0;
     std::vector<uint8_t> data;
 };
 
@@ -51,38 +46,50 @@ public:
         , m_conn(std::move(conn))
         , m_pool(pool) {}
 
-    // ── 投递消息 ─────────────────────────────────────────────────────────
-    // 如果有可用连接，消息被序列化并作为异步发送协程提交。
-    // 否则消息被缓冲（最多 k_max_buffered 条），等待 connect_and_flush()。
-
-    void deliver(uint64_t msg_type, const void* data, size_t len) override {
-        // 序列化为线格式信封
-        auto envelope = pack_actor_message(m_uri, msg_type, data, len);
-
-        // 检查当前连接是否可用
+    // 无连接时缓冲，满了返回 false，不丢弃已在队列里的消息。
+    // 有连接但没有线程池时返回 false，不提交发送。
+    bool try_deliver(uint64_t msg_type, const void* data, size_t len,
+                     uint64_t msg_id, uint8_t flags) override {
+        if (data == nullptr || len == 0) {
+            return false;
+        }
+        auto frame = pack_routed(m_uri, msg_type, flags, msg_id, m_self_node, data, len);
+        if (m_track && !m_track(msg_id, frame)) {
+            return false;
+        }
         std::shared_ptr<net::outbound_conn> conn;
         {
             std::lock_guard<std::mutex> lock(m_mutex);
             conn = m_conn;
-        }
-
-        if (conn && conn->is_valid()) {
-            // 连接可用：直接提交异步发送
-            submit_send(std::move(conn), std::move(envelope));
-            return;
-        }
-
-        // 无连接：缓冲消息，等待 connect_and_flush 批量发送
-        {
-            std::lock_guard<std::mutex> lock(m_mutex);
-            if (m_buffered.size() < k_max_buffered) {
-                m_buffered.push_back(
-                    {msg_type, std::vector<uint8_t>(
-                         static_cast<const uint8_t*>(data),
-                         static_cast<const uint8_t*>(data) + len)});
+            if (!conn || !conn->is_valid()) {
+                if (m_buffered.size() >= k_max_buffered) {
+                    return false;
+                }
+                buffered_message msg;
+                msg.msg_type = msg_type;
+                msg.msg_id = msg_id;
+                msg.flags = flags;
+                msg.data.assign(static_cast<const uint8_t*>(data),
+                                static_cast<const uint8_t*>(data) + len);
+                m_buffered.push_back(std::move(msg));
+                return true;
             }
-            // 缓冲区满时丢弃新消息 — 这是一种有意的背压策略
+            if (m_pool == nullptr) {
+                return false;
+            }
         }
+        if (!conn->post_frame(std::move(frame), m_pool)) {
+            if (m_fail) {
+                m_fail(msg_id);
+            }
+            return false;
+        }
+        return true;
+    }
+
+    void deliver(uint64_t msg_type, const void* data, size_t len) override {
+        uint64_t id = m_alloc_id ? m_alloc_id() : 1;
+        try_deliver(msg_type, data, len, id, 0);
     }
 
     const actor_uri& uri() const override {
@@ -110,14 +117,40 @@ public:
             m_conn = conn;
             pending.swap(m_buffered);
         }
-
-        // 重新序列化每条缓冲消息并提交发送
+        if (!m_pool || !conn) {
+            return;
+        }
         for (auto& buf : pending) {
-            auto envelope = pack_actor_message(
-                m_uri, buf.msg_type, buf.data.data(), buf.data.size());
-            submit_send(conn, std::move(envelope));
+            auto frame = pack_routed(m_uri, buf.msg_type, buf.flags, buf.msg_id,
+                                     m_self_node, buf.data.data(), buf.data.size());
+            if (m_track && !m_track(buf.msg_id, frame)) {
+                if (m_fail) {
+                    m_fail(buf.msg_id);
+                }
+                continue;
+            }
+            if (!conn->post_frame(std::move(frame), m_pool) && m_fail) {
+                m_fail(buf.msg_id);
+            }
         }
     }
+
+    void drop_connection() {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_conn.reset();
+    }
+
+    void set_hooks(std::function<uint64_t()> alloc_id,
+                   std::function<bool(uint64_t, const std::vector<uint8_t>&)> track,
+                   std::function<void(uint64_t)> fail = {}) {
+        m_alloc_id = std::move(alloc_id);
+        m_track = std::move(track);
+        m_fail = std::move(fail);
+    }
+
+    void set_node(uint64_t id) { m_node = id; }
+    uint64_t node_id() const { return m_node; }
+    void set_self_node(uint64_t id) { m_self_node = id; }
 
     // 当前缓冲消息数量
     size_t buffered_count() const {
@@ -131,34 +164,16 @@ public:
     }
 
 private:
-    // 将序列化好的信封提交为异步发送协程
-    void submit_send(std::shared_ptr<net::outbound_conn> conn,
-                     std::vector<uint8_t> envelope) {
-        if (!m_pool) {
-            return;
-        }
-        auto ctx = std::make_shared<send_context>(
-            send_context{std::move(conn), std::move(envelope)});
-        m_pool->submit_coroutine(
-            remote_send_impl(std::move(ctx)).release());
-    }
-
     actor_uri m_uri;
     std::shared_ptr<net::outbound_conn> m_conn;
     WorkStealingThreadPool* m_pool = nullptr;
     mutable std::mutex m_mutex;
     std::deque<buffered_message> m_buffered;
+    std::function<uint64_t()> m_alloc_id;
+    std::function<bool(uint64_t, const std::vector<uint8_t>&)> m_track;
+    std::function<void(uint64_t)> m_fail;
+    uint64_t m_node = 0;
+    uint64_t m_self_node = 0;
 };
-
-// ── 异步发送协程实现 ────────────────────────────────────────────────────
-
-// 前向声明（类定义中 submit_send 引用）
-inline ynet::async::Task<void> remote_send_impl(
-        std::shared_ptr<send_context> ctx) {
-    if (ctx->conn && ctx->conn->is_valid()) {
-        co_await ctx->conn->send(ctx->envelope);
-    }
-    co_return;
-}
 
 } // namespace ynet::actor::dist

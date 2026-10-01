@@ -10,6 +10,7 @@
 #include <cstring>
 #include <atomic>
 #include <unordered_map>
+#include <cstdint>
 
 #include "ultranet/actor/core/actor_uri.h"
 #include "ultranet/actor/core/type_hash.h"
@@ -24,6 +25,25 @@ template <typename T> class actor_ref;
 // ── 消息处理器类型 ────────────────────────────────────────────────────────
 
 using message_handler_t = std::function<void(const void* data, size_t len)>;
+
+enum class deliver_result {
+    ok,
+    threw,
+    dead_letter,
+};
+
+struct supervisor {
+    int max_restarts = 3;
+};
+
+// deliver 期间的答复上下文。入站协程不设置它。
+struct deliver_tls {
+    uint64_t correlation_id = 0;
+    uint64_t reply_conn_id = 0;
+    uint8_t flags = 0;
+};
+
+inline thread_local deliver_tls g_deliver_tls{};
 
 // ── actor 基类 ────────────────────────────────────────────────────────────
 
@@ -47,6 +67,18 @@ public:
         m_schedule_fn = std::move(fn);
     }
 
+    void install_supervisor(supervisor sv) {
+        m_supervisor = sv;
+        m_has_supervisor = true;
+        m_failure_count = 0;
+    }
+
+    virtual void on_restart() {}
+
+    // 仅在处理函数执行期间有效。flags 的 bit0 未置位时返回 false，
+    // 避免普通远端消息上的 correlation_id 被误当成 ask。
+    template <typename Reply>
+    bool reply(const Reply& msg);
     const actor_uri& uri() const { return m_uri; }
     actor_system* system() const { return m_system; }
     std::string name() const { return m_uri.name; }
@@ -85,14 +117,16 @@ public:
     // 由 pull_and_run() 在线程池上调用。
     // 内置异常边界：处理器抛出的异常会被捕获并记录，不会导致 actor 崩溃。
     // 使用限流机制防止异常风暴导致日志爆炸。
-    virtual void deliver(uint64_t msg_type, const void* data, size_t len) {
+    virtual deliver_result deliver(uint64_t msg_type, const void* data, size_t len) {
         auto it = m_handlers.find(msg_type);
         if (it != m_handlers.end()) {
-            // 找到已注册的处理器，在异常边界内调用
             try {
                 it->second(data, len);
+                return deliver_result::ok;
             } catch (const std::exception& e) {
-                // 限流：每秒最多记录一次同类型异常
+                if (m_has_supervisor) {
+                    note_supervised_failure();
+                }
                 uint64_t now = std::chrono::duration_cast<std::chrono::seconds>(
                     std::chrono::steady_clock::now().time_since_epoch()).count();
                 if (now != m_last_exception_log_sec) {
@@ -107,15 +141,19 @@ public:
                                    "(further exceptions suppressed for this second)",
                                    m_uri.to_string(), msg_type);
                 }
+                return deliver_result::threw;
             } catch (...) {
+                if (m_has_supervisor) {
+                    note_supervised_failure();
+                }
                 ULTRA_LOG_ERROR("[actor {}] handler exception for msg_type={}: "
                                "unknown", m_uri.to_string(), msg_type);
+                return deliver_result::threw;
             }
-        } else {
-            // 死信：该消息类型没有注册处理器
-            ULTRA_LOG_WARN("[actor {}] dead letter: no handler for msg_type={} "
-                          "(len={})", m_uri.to_string(), msg_type, len);
         }
+        ULTRA_LOG_WARN("[actor {}] dead letter: no handler for msg_type={} "
+                      "(len={})", m_uri.to_string(), msg_type, len);
+        return deliver_result::dead_letter;
     }
 
     // 检查是否已注册指定消息类型的处理器。
@@ -128,7 +166,8 @@ public:
 
     // 将消息信封推入 mailbox 并尝试激活 actor。
     // 由 local_actor_proxy::deliver() 和远端消息入口调用。
-    void push_envelope(message_envelope env);
+    // 进入邮箱返回 true。关闭中丢弃并返回 false。
+    bool push_envelope(message_envelope env);
 
     // 非阻塞推入：mailbox 满或关闭中返回 false。
     // 顺序必须为 push → 递增 m_pending → try_activate，
@@ -148,6 +187,7 @@ public:
     // 从 mailbox 中拉取消息并分发给处理器。
     // 在线程池上运行，返回是否处理了任何消息。
     bool pull_and_run();
+    void dispatch_envelope(message_envelope env);
 
     // 激活 actor：将 pull_and_run() 通过 schedule_fn 提交到线程池。
     // 使用 CAS 保证同一时刻只有一个执行实例。
@@ -174,7 +214,7 @@ public:
     // 在优雅关闭时使用：线程池已停止，在销毁 actor 之前处理最后的消息。
     void drain_pending() {
         auto handler = [this](message_envelope env) {
-            deliver(env.msg_type, env.bytes(), env.size());
+            dispatch_envelope(std::move(env));
         };
         m_mailbox.drain(handler, size_t(-1));
         m_pending.store(0, std::memory_order_release);
@@ -196,14 +236,26 @@ private:
     // 异常日志限流：防止异常风暴导致日志爆炸
     uint64_t m_last_exception_log_sec = 0;
     int m_exception_count = 0;
+    bool m_has_supervisor = false;
+    supervisor m_supervisor{};
+    int m_failure_count = 0;
+
+    void note_supervised_failure() {
+        m_failure_count++;
+        if (m_failure_count <= m_supervisor.max_restarts) {
+            on_restart();
+        } else {
+            set_shutting_down(true);
+        }
+    }
 };
 
 // ── 内联实现 ──────────────────────────────────────────────────────────────
 
-inline void actor_base::push_envelope(message_envelope env) {
+inline bool actor_base::push_envelope(message_envelope env) {
     // 关闭期间静默丢弃消息，防止线程池已销毁后的 use-after-free
     if (m_shutting_down.load(std::memory_order_acquire)) {
-        return;
+        return false;
     }
 
     // 前 64 次让出，之后只睡 1μs。10μs/100μs 会把灌入吞吐拉到睡眠上。
@@ -212,7 +264,7 @@ inline void actor_base::push_envelope(message_envelope env) {
         if (m_mailbox.try_push(env)) {
             m_pending.fetch_add(1, std::memory_order_release);
             try_activate();
-            return;
+            return true;
         }
         if (attempt < 64) {
             std::this_thread::yield();
@@ -224,6 +276,7 @@ inline void actor_base::push_envelope(message_envelope env) {
     m_mailbox.push_blocking(env);
     m_pending.fetch_add(1, std::memory_order_release);
     try_activate();
+    return true;
 }
 
 inline bool actor_base::pull_and_run() {
@@ -233,7 +286,7 @@ inline bool actor_base::pull_and_run() {
 
     // 构造分发 lambda：将 mailbox 中的消息投递给 deliver()
     auto handler = [this](message_envelope env) {
-        deliver(env.msg_type, env.bytes(), env.size());
+        dispatch_envelope(std::move(env));
     };
 
     // 批量排空 mailbox

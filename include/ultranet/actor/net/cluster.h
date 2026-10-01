@@ -41,6 +41,11 @@ public:
         return m_id;
     }
 
+    std::string self_addr() {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        return m_self.addr;
+    }
+
     // 获取当前存活节点列表（排除超时节点）
     std::vector<node_info> live_nodes(uint64_t timeout_ms = 3000) {
         std::lock_guard<std::mutex> lock(m_mutex);

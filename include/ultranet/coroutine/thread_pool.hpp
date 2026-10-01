@@ -75,6 +75,7 @@ public:
                 worker.join();
             }
         }
+        TaskPromiseBase::release_cached_frame();
         for (int fd : m_event_fds) {
             if (fd >= 0) {
                 ::close(fd);
@@ -411,6 +412,7 @@ private:
         while (auto t = m_local_queues[worker_id]->pop()) { (*t)(); }
         while (auto t = m_mpsc_queues[worker_id]->try_pop()) { (*t)(); }
 
+        TaskPromiseBase::release_cached_frame();
         t_thread_local_state.pool = nullptr;
         t_thread_local_state.worker_id = static_cast<size_t>(-1);
     }
