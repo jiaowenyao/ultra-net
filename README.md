@@ -9,6 +9,7 @@
 - **WebSocket** — 开箱即用服务器，帧编解码，零拷贝 echo，benchmark 追平 uWebSockets
 - **HTTP** — 开箱即用服务器，keep-alive，wrk 压测 220k req/s, P50=29μs
 - **Actor 框架** — CRTP actor，本地 mailbox 调度；两端进程都活着时远端是至少一次。可选发送/接收日志。gossip 发现
+- **发送与采集** — `emit_*` / `collect_*` 把记录批写成 TCP 长度前缀或 UDP 数据报。见 [collect-guide.md](docs/collect-guide.md)
 - **Header-only** — `#include "ultranet/ultranet.h"` 即用，无额外编译
 - **工作窃取线程池** — MPSC 队列 + 全量排空调度，P99 尾部延迟可控
 

@@ -4,6 +4,7 @@
 
 ## 1. 正确性验证
 - [ ] `actor_gtest` 在 `ASAN_OPTIONS=detect_leaks=1:halt_on_error=1` 下退出码 0，stderr 没有 `LeakSanitizer`（2026-10-01：141 通过）
+- [ ] `collect_gtest` 同样的 ASAN 选项下 10 项通过，其中包括 `CollectGuide.SocketPairRoundTrip`
 - [ ] `actor_dist_runtime_test` 同样的 ASAN 选项下退出码 0，`dist_failures=0`
 - [ ] 旧套件 `actor_v2_test`、`actor_mailbox_test`、`actor_robustness_test` 仍在 `tests/CMakeLists.txt`，不再当作当前通过线
 

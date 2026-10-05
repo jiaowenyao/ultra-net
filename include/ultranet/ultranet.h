@@ -57,6 +57,7 @@
 #include "ultranet/net/ws_server.hpp"
 #include "ultranet/net/service_discovery.hpp"
 #include "ultranet/log/logger.hpp"
+#include "ultranet/collect/collect.hpp"
 
 // Version information
 #define ULTRANET_VERSION_MAJOR 0
