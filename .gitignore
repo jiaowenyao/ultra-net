@@ -60,3 +60,6 @@ install_manifest.txt
 .copilot/
 *.memory/
 data/
+
+docs/
+
